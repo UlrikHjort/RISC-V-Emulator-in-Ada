@@ -1,0 +1,11 @@
+# Vendored third-party code.
+#
+# programs/doom/doomgeneric/ is the doomgeneric port of the id Software DOOM
+# engine (GPLv2), vendored so that "make doom" works from a fresh clone. It is
+# not our code, and at ~1.6 MB it is roughly half of all the C in the
+# repository -- without this marker GitHub reports the project as majority C
+# rather than Ada.
+#
+# GitHub's Linguist auto-detects vendored code only under conventional paths
+# such as vendor/ or third_party/, which this is not, so it has to be declared.
+programs/doom/doomgeneric/** linguist-vendored
