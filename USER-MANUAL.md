@@ -39,8 +39,19 @@ A RISC-V emulator written in Ada, supporting **RV32IMAFDC + V** plus **RV64IMAFD
 ```bash
 # Install on Ubuntu/Debian
 sudo apt install gnat
-sudo apt install gcc-riscv64-unknown-elf   # provides riscv32-unknown-elf-gcc too
+sudo apt install gcc-riscv64-unknown-elf
 ```
+
+The Debian/Ubuntu package installs the compiler as `riscv64-unknown-elf-gcc`,
+while the Makefiles default to the `riscv32-unknown-elf-` prefix. Point them at
+what you actually have:
+
+```bash
+make -C programs CROSS=riscv64-unknown-elf-
+```
+
+See [Writing C Programs](doc/WRITING-PROGRAMS.md) for other toolchain sources
+and how to check that yours can target RV32.
 
 ### Building the Emulator
 
@@ -723,6 +734,9 @@ cd arch-test && make test
 which riscv32-unknown-elf-gcc
 # If not found:
 sudo apt install gcc-riscv64-unknown-elf
+
+# The package installs a riscv64- prefix, so tell the Makefiles about it:
+make -C programs CROSS=riscv64-unknown-elf-
 ```
 
 ---

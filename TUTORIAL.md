@@ -67,17 +67,24 @@ cd programs
 make all                    # builds all ~45 programs into out/elf/ and out/bin/
 ```
 
-Or build one at a time:
+Or build one at a time, naming the output file rather than the program:
 
 ```bash
-make branch-test            # builds out/elf/branch-test.elf + out/bin/branch-test.bin
+make out/bin/branch-test.bin   # also produces out/elf/branch-test.elf
 ```
+
+The bare program names (`make branch-test`) are listed in `.PHONY` but have no
+rules behind them, so make reports "Nothing to be done" and builds nothing.
 
 ### Prerequisites
 
 - GNAT Ada compiler (`gnat` / `gnatmake`)
-- `riscv32-unknown-elf-gcc` toolchain (used as `riscv32-unknown-elf-gcc`)
+- A bare-metal RISC-V cross-compiler; the Makefiles default to the
+  `riscv32-unknown-elf-` prefix, overridable with `make CROSS=...`
 - Standard build tools (`make`, `objcopy`, `objdump`)
+
+To install a cross-compiler, or to compile a C program of your own, see
+[doc/WRITING-PROGRAMS.md](doc/WRITING-PROGRAMS.md).
 
 ---
 

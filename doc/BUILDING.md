@@ -22,11 +22,14 @@
 
 - **RISC-V Cross-Compiler** - For building test C programs
   ```bash
-  # Ubuntu/Debian
+  # Ubuntu/Debian -- installs a riscv64-unknown-elf- prefix
   sudo apt install gcc-riscv64-unknown-elf
+  make -C programs CROSS=riscv64-unknown-elf-
 
   # Or build from source / use prebuilt toolchains
   ```
+  See [Writing C Programs](WRITING-PROGRAMS.md) for other sources, prefixes,
+  and RV32 multilib checks.
 
 ## Building the Emulator
 
@@ -110,18 +113,28 @@ make clean     # Remove generated files
 
 The test Makefile expects:
 - `riscv32-unknown-elf-gcc`
+- `riscv32-unknown-elf-as`
 - `riscv32-unknown-elf-objcopy`
 
-Or modify `test/Makefile` for your toolchain prefix.
+Override the prefix rather than editing the Makefile:
+```bash
+make -C test CROSS=riscv64-unknown-elf-
+```
 
 ### Test Program Compilation
 
-Each test is compiled with:
+Each test is assembled, compiled and linked with:
 ```bash
-riscv32-unknown-elf-gcc -march=rv32imfd -mabi=ilp32d \
-    -nostdlib -nostartfiles -T linker.ld \
-    -o program.elf start.S program.c
+riscv32-unknown-elf-as -march=rv32im -mabi=ilp32 -o start.o start.S
+riscv32-unknown-elf-gcc -march=rv32imfd -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+    -c -o program.o program.c
+riscv32-unknown-elf-gcc -march=rv32imfd -mabi=ilp32 -nostdlib -ffreestanding -O2 \
+    -Ttext=0x0 -nostdlib -o program.elf start.o program.o
 ```
+
+These link at address `0x0`, so run them with `--machine simple`. The programs
+under `programs/` use the `hello.ld` script and `0x80000000` instead -- see
+[Writing C Programs](WRITING-PROGRAMS.md).
 
 ## Running Tests
 

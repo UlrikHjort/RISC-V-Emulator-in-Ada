@@ -818,6 +818,10 @@ extern int atoi(const char *str);  // Declare as needed
 
 ### Build Example
 
+To compile a program of your own rather than one that ships here, see
+[Writing C Programs](WRITING-PROGRAMS.md) -- in particular which `.c` files to
+add to the link, and why `ftoa.c` needs `-march=rv32imfd` or `-lgcc`.
+
 ```bash
 cd programs
 make fibonacci.bin      # Automatically includes printf.c, ftoa.c
@@ -955,3 +959,4 @@ $(CC) $(CFLAGS) $(LDFLAGS) -o $@ crt0.S uart.c log.c time.c my-test.c
 - `programs/string-test.c` - String function test cases
 - `programs/stdlib-test.c` - Stdlib function examples
 - `doc/TESTING.md` - How to run and test programs
+- `doc/WRITING-PROGRAMS.md` - Cross-compiler setup and compiling your own programs

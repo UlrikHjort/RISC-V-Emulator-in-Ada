@@ -124,6 +124,7 @@ Common exit scenarios:
 
 ## Next Steps
 
+- Read [WRITING-PROGRAMS.md](WRITING-PROGRAMS.md) to install a cross-compiler and build your own C programs
 - Read [DEBUGGING.md](DEBUGGING.md) for interactive debugging
 - Read [PROFILES.md](PROFILES.md) for custom memory layouts
 - Read [ISA.md](ISA.md) for supported instructions

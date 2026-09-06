@@ -16,6 +16,7 @@ Supports RV32IMAFDC + V + Zbb/Zbs/Zba/Zbkc/Zbkx/A/Zicond/Zfh + RV32E and RV64IMA
 | [Profiling](PROFILING.md) | Profiler, coverage tracking, trace/replay |
 | [GDB](GDB.md) | GDB remote stub |
 | [Building](BUILDING.md) | Build instructions and toolchain |
+| [Writing C Programs](WRITING-PROGRAMS.md) | Installing a cross-compiler and compiling your own programs |
 | [Testing](TESTING.md) | Ada unit tests and program validation |
 | [C Library](C-LIBRARY.md) | Bare-metal C runtime (stdio, string, malloc, setjmp) |
 | [Math Library](MATH_LIBRARY.md) | `math.h` for bare-metal programs |

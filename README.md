@@ -11,6 +11,7 @@ A RISC-V emulator written in Ada. Supports RV32IMAFDC + RVV 1.0 + Zbb/Zbs/Zba + 
 - **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)** - Quick reference for all commands and workflows
 - **[STATUS.md](STATUS.md)** - Feature status, test inventory, CLI flag summary
 - **[TESTING.md](TESTING.md)** - Test suite and validation procedures
+- **[doc/WRITING-PROGRAMS.md](doc/WRITING-PROGRAMS.md)** - Installing a cross-compiler and compiling your own C programs
 
 ### Reference Documentation
 
