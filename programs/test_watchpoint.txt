@@ -1,0 +1,8 @@
+# Test watchpoint functionality
+b main
+c
+# Set watchpoint on a memory address that will be written
+watch 0x80002000 w
+wl
+c
+q
