@@ -1,6 +1,24 @@
-# RISC-V Emulator (RV32IMAFDC + RVV + Zbb/Zba/Zbkc/Zbkx + Zfh + RV32E + A + C + RV64 + PLIC + VirtIO + Multi-hart)
+# RISC-V Emulator
 
-A RISC-V emulator written in Ada. Supports RV32IMAFDC + RVV 1.0 + Zbb/Zbs/Zba + Zbkc/Zbkx + A + C + Zicond + Zfh + **RV32E/RV64E** (16-register subset) plus **RV64IMAFD + Zbb/Zba/A/Zicond** (auto-detected from ELF class). Includes PLIC, VirtIO MMIO block device, Sv39 MMU, multi-hart support, load-use/branch-taken pipeline stall model, L1 cache simulation (miss stalls visible in `mcycle`), and GDB hardware watchpoint stop reply (watch/rwatch/awatch). A semihosting host file-I/O interface (ECALLs 0x505-0x50C) even runs a bare-metal **DOOM** port (doomgeneric). 78 test programs, 2189 assertions - all passing.
+A RISC-V emulator written in Ada, for embedded software testing and
+development. It runs both 32- and 64-bit bare-metal programs, emulates the
+peripherals they expect, and ships with a debugger, a GDB stub, a profiler and
+a cycle-stall timing model.
+
+| | |
+|---|---|
+| **32-bit ISA** | RV32IMAFDC + RVV 1.0 + Zbb/Zbs/Zba + Zbkc/Zbkx + Zicsr + Zicond + Zfh |
+| **64-bit ISA** | RV64IMAFD + Zbb/Zba/A/Zicond - selected automatically from the ELF header |
+| **Embedded subsets** | RV32E and RV64E, 16 registers, opt-in via `--rv32e` / `--rv64e` |
+| **Privilege** | M, S and U modes, Sv39 MMU, PLIC, CLINT, SBI shim, multi-hart (`--harts N`) |
+| **Peripherals** | UART 16550 (PTY-backed), GPIO, SPI + 64KB flash, I2C, timer, watchdog, DMA, VirtIO MMIO block |
+| **Timing model** | Load-use and branch-taken stalls, L1 I+D cache simulation - miss penalties visible in `mcycle` |
+| **Tooling** | Interactive debugger, GDB stub with hardware watchpoints, profiler with flamegraph export, coverage, binary trace/replay |
+| **Tests** | 78 programs, 2189 assertions - all passing |
+
+A semihosting host file-I/O interface (ECALLs `0x505`-`0x50C`) lets guest
+programs read and write real files, which is complete enough to run a
+bare-metal **DOOM** port (doomgeneric).
 
 ## Documentation
 
