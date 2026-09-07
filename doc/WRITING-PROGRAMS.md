@@ -27,6 +27,14 @@ You need a bare-metal ("newlib" or "elf") RISC-V GCC. A Linux-targeted
 compiler such as `gcc-riscv64-linux-gnu` will *not* work: these programs are
 freestanding, built with `-nostdlib -nostartfiles`.
 
+Nearly every RISC-V bare-metal toolchain -- distribution packages, prebuilt
+tarballs and vendor SDKs alike -- is built from the upstream
+[riscv-collab/riscv-gnu-toolchain](https://github.com/riscv-collab/riscv-gnu-toolchain)
+sources. That repository is both the place to get a
+[prebuilt release](https://github.com/riscv-collab/riscv-gnu-toolchain/releases)
+and the reference for building one yourself; the sections below use it for
+both.
+
 ### Which prefix do the Makefiles expect?
 
 All three Makefiles (`programs/`, `test/`, `examples/`) default to:
@@ -42,7 +50,7 @@ part of the program name**, not something GCC figures out. The common ones:
 |--------|---------------|
 | Built from source with `--with-arch=rv32imc` | `riscv32-unknown-elf-gcc` |
 | Debian/Ubuntu package `gcc-riscv64-unknown-elf` | `riscv64-unknown-elf-gcc` |
-| riscv-collab prebuilt release tarballs | `riscv32-unknown-elf-gcc` or `riscv64-unknown-elf-gcc` |
+| [riscv-collab](https://github.com/riscv-collab/riscv-gnu-toolchain/releases) prebuilt release tarballs | `riscv32-unknown-elf-gcc` or `riscv64-unknown-elf-gcc` |
 | xPack `riscv-none-elf-gcc` | `riscv-none-elf-gcc` |
 
 If yours is not `riscv32-unknown-elf-`, do not rename anything -- pass the

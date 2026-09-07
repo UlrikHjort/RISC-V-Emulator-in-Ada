@@ -432,10 +432,19 @@ make run-echo
 
 ### Cross-Compiler Requirements
 
-Tests require `riscv32-unknown-elf-gcc` toolchain:
+Tests require a bare-metal RISC-V GCC. The Makefiles default to the
+`riscv32-unknown-elf-` prefix; the Debian/Ubuntu package installs
+`riscv64-unknown-elf-` instead, so point them at what you have:
+
 ```bash
 sudo apt install gcc-riscv64-unknown-elf
+make -C programs CROSS=riscv64-unknown-elf-
 ```
+
+Prebuilt tarballs and build-from-source instructions live upstream at
+[riscv-collab/riscv-gnu-toolchain](https://github.com/riscv-collab/riscv-gnu-toolchain).
+See [doc/WRITING-PROGRAMS.md](doc/WRITING-PROGRAMS.md) for the other prefixes
+and how to check that yours can target RV32.
 
 
 ## Roadmap

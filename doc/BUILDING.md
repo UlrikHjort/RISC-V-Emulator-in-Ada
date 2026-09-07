@@ -26,7 +26,8 @@
   sudo apt install gcc-riscv64-unknown-elf
   make -C programs CROSS=riscv64-unknown-elf-
 
-  # Or build from source / use prebuilt toolchains
+  # Or use a prebuilt tarball / build from source, both from
+  # https://github.com/riscv-collab/riscv-gnu-toolchain
   ```
   See [Writing C Programs](WRITING-PROGRAMS.md) for other sources, prefixes,
   and RV32 multilib checks.

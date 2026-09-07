@@ -303,8 +303,8 @@ $(BIN)/my-test.bin: $(ELF)/my-test.elf | $(BIN) $(DIS)
     $(OBJDUMP) -d $< > $(DIS)/my-test.dis
 
 run-my-test: $(BIN)/my-test.bin
-    $(EMULATOR) --machine qemu-virt --pty --wait $< 80000000
-    @cat my-test.log
+    $(EMULATOR) $(LOGFLAGS) --machine qemu-virt --pty --wait $< 80000000
+    @cat $(LOG_DIR)/my-test.log
 ```
 
 ```c

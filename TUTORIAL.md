@@ -1256,8 +1256,8 @@ $(BIN)/my-test.bin: $(ELF)/my-test.elf | $(BIN) $(DIS)
 my-test: $(BIN)/my-test.bin
 
 run-my-test: $(BIN)/my-test.bin
-	$(EMULATOR) --machine qemu-virt -q $< 80000000
-	@cat my-test.log
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $< 80000000
+	@cat $(LOG_DIR)/my-test.log
 ```
 
 ### Step 3 - Build and run
@@ -1664,8 +1664,8 @@ $(BIN)/my-test.bin: $(ELF)/my-test.elf | $(BIN) $(DIS)
 my-test: $(BIN)/my-test.bin
 
 run-my-test: $(BIN)/my-test.bin
-	$(EMULATOR) --machine qemu-virt -q $< 80000000
-	@cat my-test.log
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $< 80000000
+	@cat $(LOG_DIR)/my-test.log
 ```
 
 ### C program skeleton

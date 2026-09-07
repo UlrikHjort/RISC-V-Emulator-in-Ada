@@ -10,6 +10,7 @@ cd "$(dirname "$0")"
 EMU="bin/riscv_emulator"
 PROG="programs/out/bin"
 ELF="programs/out/elf"
+LOGS="programs/logs"
 
 # -- Colours ----------------------------------------------------------------
 C_RESET='\033[0m'
@@ -104,11 +105,12 @@ section "1/13" "Running a Program"
 info "  The emulator loads a flat binary or ELF and runs it bare-metal."
 info "  --machine qemu-virt places RAM at 0x80000000 (128 MB) with UART, PLIC, etc."
 info "  -q suppresses the UART PTY message; results appear in a log file."
+info "  --log-dir tells the emulator where to put that log (default: current dir)."
 
 sub "SHA-256 test — 6 NIST test vectors"
 skip_if_missing "$PROG/sha256-test.bin" && \
-run_cmd $EMU --machine qemu-virt -q $PROG/sha256-test.bin 80000000
-run_cmd cat programs/logs/sha256-test.log
+run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/sha256-test.bin 80000000
+run_cmd cat $LOGS/sha256-test.log
 
 pause
 
@@ -123,7 +125,7 @@ info "  Output: PC  encoding  disassembly  register-result"
 
 sub "First 25 instructions of branch-test"
 skip_if_missing "$PROG/branch-test.bin" && \
-run_cmd --head 30 $EMU --machine qemu-virt -q -t --max-instructions 25 $PROG/branch-test.bin 80000000
+run_cmd --head 30 $EMU --machine qemu-virt --log-dir $LOGS -q -t --max-instructions 25 $PROG/branch-test.bin 80000000
 
 pause
 
@@ -138,10 +140,10 @@ info "  Commands: regs, d (disassemble), b (breakpoint), s (step), c (continue),
 
 sub "Scripted debug session on sha256-test"
 skip_if_missing "$PROG/sha256-test.bin" && {
-    echo -e "${C_YELLOW}  \$${C_RESET} ${C_WHITE}echo 'regs\\nd 0x80000000 8\\nb main\\nc\\nregs\\nq' | $EMU --machine qemu-virt -d $PROG/sha256-test.bin 80000000${C_RESET}"
+    echo -e "${C_YELLOW}  \$${C_RESET} ${C_WHITE}echo 'regs\\nd 0x80000000 8\\nb main\\nc\\nregs\\nq' | $EMU --machine qemu-virt --log-dir $LOGS -d $PROG/sha256-test.bin 80000000${C_RESET}"
     echo
     printf 'regs\nd 0x80000000 8\nb main\nc\nregs\nq\n' \
-        | $EMU --machine qemu-virt -d "$PROG/sha256-test.bin" 80000000 2>&1 | head -60 || true
+        | $EMU --machine qemu-virt --log-dir $LOGS -d "$PROG/sha256-test.bin" 80000000 2>&1 | head -60 || true
 }
 
 pause
@@ -156,7 +158,7 @@ info "  --flamegraph <file> writes a folded-stack file for flamegraph.pl."
 
 sub "Profile sha256-test (top functions + opcode histogram excerpt)"
 skip_if_missing "$PROG/sha256-test.bin" && \
-run_cmd --head 50 $EMU --machine qemu-virt -q --profile $PROG/sha256-test.bin 80000000
+run_cmd --head 50 $EMU --machine qemu-virt --log-dir $LOGS -q --profile $PROG/sha256-test.bin 80000000
 
 pause
 
@@ -170,7 +172,7 @@ info "  With an ELF, it reports per-function coverage percentages."
 
 sub "Coverage report for sha256-test (ELF, RV32)"
 skip_if_missing "$ELF/sha256-test.elf" && \
-run_cmd --head 30 $EMU --machine qemu-virt -q --coverage $ELF/sha256-test.elf
+run_cmd --head 30 $EMU --machine qemu-virt --log-dir $LOGS -q --coverage $ELF/sha256-test.elf
 
 pause
 
@@ -185,8 +187,8 @@ info "  Useful for determinism checks and bisecting non-deterministic bugs."
 
 sub "Record a trace of branch-test, then replay and verify"
 skip_if_missing "$PROG/branch-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q --irecord /tmp/branch.trace $PROG/branch-test.bin 80000000
-    run_cmd $EMU --machine qemu-virt -q --ireplay  /tmp/branch.trace $PROG/branch-test.bin 80000000
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q --irecord /tmp/branch.trace $PROG/branch-test.bin 80000000
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q --ireplay  /tmp/branch.trace $PROG/branch-test.bin 80000000
     rm -f /tmp/branch.trace
 }
 
@@ -202,8 +204,8 @@ info "  Supports integer and FP vector arithmetic, reductions, masks, gather/sca
 
 sub "RVV advanced test — strided loads, masked ops, gather, FP reductions"
 skip_if_missing "$PROG/rvv-advanced.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/rvv-advanced.bin 80000000
-    run_cmd cat programs/logs/rvv-advanced.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/rvv-advanced.bin 80000000
+    run_cmd cat $LOGS/rvv-advanced.log
 }
 
 pause
@@ -215,26 +217,26 @@ section "8/13" "Crypto Suite"
 
 sub "ChaCha20-Poly1305 (RFC 8439 AEAD)"
 skip_if_missing "$PROG/chacha20-poly1305.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/chacha20-poly1305.bin 80000000
-    run_cmd cat programs/logs/chacha20-poly1305.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/chacha20-poly1305.bin 80000000
+    run_cmd cat $LOGS/chacha20-poly1305.log
 }
 
 sub "AES-GCM (NIST 128-bit authenticated encryption)"
 skip_if_missing "$PROG/aes-gcm.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/aes-gcm.bin 80000000
-    run_cmd cat programs/logs/aes-gcm.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/aes-gcm.bin 80000000
+    run_cmd cat $LOGS/aes-gcm.log
 }
 
 sub "X25519 — Curve25519 Diffie-Hellman (RFC 7748)"
 skip_if_missing "$PROG/x25519-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/x25519-test.bin 80000000
-    run_cmd cat programs/logs/x25519-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/x25519-test.bin 80000000
+    run_cmd cat $LOGS/x25519-test.log
 }
 
 sub "Ed25519 — digital signatures (RFC 8032)"
 skip_if_missing "$PROG/ed25519-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/ed25519-test.bin 80000000
-    run_cmd cat programs/logs/ed25519-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/ed25519-test.bin 80000000
+    run_cmd cat $LOGS/ed25519-test.log
 }
 
 pause
@@ -252,13 +254,13 @@ info "  --profile shows a stall breakdown by category."
 
 sub "Pipeline stall test — load-use + branch-taken penalties"
 skip_if_missing "$PROG/pipeline-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/pipeline-test.bin 80000000
-    run_cmd cat programs/logs/pipeline-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/pipeline-test.bin 80000000
+    run_cmd cat $LOGS/pipeline-test.log
 }
 
 sub "Profiler stall breakdown — sha256-test"
 skip_if_missing "$PROG/sha256-test.bin" && \
-run_cmd --head 35 $EMU --machine qemu-virt -q --profile $PROG/sha256-test.bin 80000000
+run_cmd --head 35 $EMU --machine qemu-virt --log-dir $LOGS -q --profile $PROG/sha256-test.bin 80000000
 
 pause
 
@@ -273,21 +275,21 @@ info "  Supports RV64IMAFD + Zbb/Zba/A + Zicond + Sv39 virtual memory."
 
 sub "RV64 SHA-256 — same algorithm, 64-bit registers"
 skip_if_missing "$ELF/rv64-sha256-test.elf" && {
-    run_cmd $EMU --machine qemu-virt -q $ELF/rv64-sha256-test.elf
-    run_cmd cat programs/logs/rv64-sha256-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $ELF/rv64-sha256-test.elf
+    run_cmd cat $LOGS/rv64-sha256-test.log
 }
 
 sub "RV64 W-suffix ops — ADDIW, ADDW, SUBW, SLLW, SRLW, SRAW (38 assertions)"
 skip_if_missing "$ELF/rv64-wops-test.elf" && {
-    run_cmd $EMU --machine qemu-virt -q $ELF/rv64-wops-test.elf
-    run_cmd --head 5 cat programs/logs/rv64-wops-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $ELF/rv64-wops-test.elf
+    run_cmd --head 5 cat $LOGS/rv64-wops-test.log
     echo -e "${C_DIM}  … (38 total)${C_RESET}"
 }
 
 sub "Sv39 virtual memory — 3-level page table, TLB, page faults"
 skip_if_missing "$ELF/sv39-test.elf" && {
-    run_cmd $EMU --machine qemu-virt -q $ELF/sv39-test.elf
-    run_cmd --head 12 cat programs/logs/sv39-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $ELF/sv39-test.elf
+    run_cmd --head 12 cat $LOGS/sv39-test.log
 }
 
 pause
@@ -303,14 +305,14 @@ info "  SBI shim handles S-mode ECALLs (set_timer, putchar, shutdown, …)."
 
 sub "S-mode test — CSRs, stvec, sepc, scause, delegation"
 skip_if_missing "$PROG/smode-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/smode-test.bin 80000000
-    run_cmd cat programs/logs/smode-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/smode-test.bin 80000000
+    run_cmd cat $LOGS/smode-test.log
 }
 
 sub "U-mode test — M→S→U transition, ecall delegation, illegal CSR trap"
 skip_if_missing "$PROG/umode-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/umode-test.bin 80000000
-    run_cmd cat programs/logs/umode-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/umode-test.bin 80000000
+    run_cmd cat $LOGS/umode-test.log
 }
 
 pause
@@ -325,8 +327,8 @@ info "  512KB disk (1024 × 512-byte sectors).  PLIC source 8 drives interrupts.
 info "  Driver negotiates features, builds 3-descriptor virtqueues, reads/writes sectors."
 
 skip_if_missing "$PROG/virtio-blk-test.bin" && {
-    run_cmd $EMU --machine qemu-virt -q $PROG/virtio-blk-test.bin 80000000
-    run_cmd cat programs/logs/virtio-blk-test.log
+    run_cmd $EMU --machine qemu-virt --log-dir $LOGS -q $PROG/virtio-blk-test.bin 80000000
+    run_cmd cat $LOGS/virtio-blk-test.log
 }
 
 pause

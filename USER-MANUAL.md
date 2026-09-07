@@ -50,6 +50,9 @@ what you actually have:
 make -C programs CROSS=riscv64-unknown-elf-
 ```
 
+Prebuilt tarballs for other distributions, and the sources to build a
+toolchain yourself, are upstream at
+[riscv-collab/riscv-gnu-toolchain](https://github.com/riscv-collab/riscv-gnu-toolchain).
 See [Writing C Programs](doc/WRITING-PROGRAMS.md) for other toolchain sources
 and how to check that yours can target RV32.
 
