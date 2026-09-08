@@ -40,6 +40,9 @@ with RISCV.Term_IO;
 
 package body RISCV.CPU is
 
+   --  Access_Result comparisons in the load/store paths below.
+   use type Memory.Access_Result;
+
    function To_Word is new Ada.Unchecked_Conversion (Signed_Word, Word);
    function To_Signed is new Ada.Unchecked_Conversion (Word, Signed_Word);
 
@@ -144,25 +147,50 @@ package body RISCV.CPU is
          return;
       end if;
 
-      --  Fetch instruction: check for compressed (16-bit) first
-      Instruction := Memory.Read_Word (Mem, Memory_Address (CPU.PC));
-
-      if Compressed.Is_Compressed (Instruction) then
-         --  16-bit compressed instruction
-         Is_Compressed := True;
-         Instr_Size := 2;
-         --  Expand compressed to 32-bit equivalent
-         Instruction := Compressed.Expand
-           (Half_Word (Instruction and 16#FFFF#));
-         if Instruction = Compressed.ILLEGAL_INSTR then
-            CPU.Exception_Code := Illegal_Instruction;
-            Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
+      --  Fetch instruction: check for compressed (16-bit) first.
+      --  The low half-word is fetched on its own so that a 16-bit
+      --  instruction in the last half-word of a region does not fault on
+      --  the two bytes past its end that a full word fetch would touch.
+      Memory.Clear_Access_Fault (Mem);
+      declare
+         Lo   : Half_Word;
+         Hi   : Half_Word;
+         Both : Boolean;
+      begin
+         Memory.Read_Insn_Halves
+            (Mem, Memory_Address (CPU.PC), Lo, Hi, Both);
+         if Memory.Pending_Fault (Mem) /= Memory.OK then
+            CPU.Exception_Code := Insn_Access_Fault;
+            Trap_Entry (CPU, CSR.CAUSE_INSN_ACCESS_FAULT, CPU.PC);
             return;
          end if;
-      else
-         Is_Compressed := False;
-         Instr_Size := 4;
-      end if;
+
+         if Compressed.Is_Compressed (Word (Lo)) then
+            --  16-bit compressed instruction
+            Is_Compressed := True;
+            Instr_Size := 2;
+            --  Expand compressed to 32-bit equivalent
+            Instruction := Compressed.Expand (Lo);
+            if Instruction = Compressed.ILLEGAL_INSTR then
+               CPU.Exception_Code := Illegal_Instruction;
+               Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
+               return;
+            end if;
+         else
+            Is_Compressed := False;
+            Instr_Size := 4;
+            if not Both then
+               Hi := Memory.Read_Half_Word
+                        (Mem, Memory_Address (CPU.PC) + 2);
+               if Memory.Pending_Fault (Mem) /= Memory.OK then
+                  CPU.Exception_Code := Insn_Access_Fault;
+                  Trap_Entry (CPU, CSR.CAUSE_INSN_ACCESS_FAULT, CPU.PC);
+                  return;
+               end if;
+            end if;
+            Instruction := Word (Lo) or Shift_Left (Word (Hi), 16);
+         end if;
+      end;
 
       Decoded := Decode (Instruction);
 
@@ -294,6 +322,7 @@ package body RISCV.CPU is
          -------------------
          when OPCODE_LOAD =>
             Address := Memory_Address (To_Word (To_Signed (Rs1_Val) + Decoded.Imm_I));
+            Memory.Clear_Access_Fault (Mem);
 
             case Decoded.Funct3 is
                when FUNCT3_LB =>
@@ -326,6 +355,15 @@ package body RISCV.CPU is
                   return;
             end case;
 
+            --  An unmapped or unreadable byte anywhere in the access is a
+            --  load access fault; rd must be left unwritten.
+            if Memory.Pending_Fault (Mem) /= Memory.OK then
+               CPU.Exception_Code := Load_Access_Fault;
+               Trap_Entry (CPU, CSR.CAUSE_LOAD_ACCESS_FAULT,
+                           Word (Memory.Pending_Fault_Address (Mem)));
+               return;
+            end if;
+
             Write_Register (CPU, Decoded.Rd, Result);
 
             --  Record load for load-use hazard detection
@@ -337,6 +375,7 @@ package body RISCV.CPU is
          --------------------
          when OPCODE_STORE =>
             Address := Memory_Address (To_Word (To_Signed (Rs1_Val) + Decoded.Imm_S));
+            Memory.Clear_Access_Fault (Mem);
 
             case Decoded.Funct3 is
                when FUNCT3_SB =>
@@ -354,6 +393,15 @@ package body RISCV.CPU is
                   Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
                   return;
             end case;
+
+            --  A store to unmapped memory, or to a read-only region, is a
+            --  store access fault rather than a silent no-op.
+            if Memory.Pending_Fault (Mem) /= Memory.OK then
+               CPU.Exception_Code := Store_Access_Fault;
+               Trap_Entry (CPU, CSR.CAUSE_STORE_ACCESS_FAULT,
+                           Word (Memory.Pending_Fault_Address (Mem)));
+               return;
+            end if;
 
          ----------------------------
          -- OP-IMM (I-type ALU ops)
@@ -812,31 +860,41 @@ package body RISCV.CPU is
                                         Memory_Address (A0_Val) +
                                         Memory_Address (I - 1)));
                               end loop;
-                              if Mem.Log_File_Open then
-                                 Close (Mem.Log_File.all);
-                                 Mem.Log_File_Open := False;
-                              end if;
-                              if Mem.Log_File = null then
-                                 Mem.Log_File :=
-                                    new Ada.Text_IO.File_Type;
-                              end if;
-                              if Mem.Log_Dir_Len > 0 then
-                                 declare
-                                    Dir  : constant String :=
-                                       Mem.Log_Dir (1 .. Mem.Log_Dir_Len);
-                                    Path : constant String :=
-                                       Dir & "/" & Name;
-                                 begin
-                                    if not Ada.Directories.Exists (Dir) then
-                                       Ada.Directories.Create_Path (Dir);
-                                    end if;
-                                    Create (Mem.Log_File.all, Out_File, Path);
-                                 end;
+                              --  The log name comes from the guest, so it
+                              --  is confined like any other host path:
+                              --  relative, and with no ".." escape.
+                              if Mem.Host_IO = Memory.Off
+                                or else not Memory.Valid_Host_Name (Name)
+                              then
+                                 Write_Register (CPU, 10, Word'Last);
                               else
-                                 Create (Mem.Log_File.all, Out_File, Name);
+                                 if Mem.Log_File_Open then
+                                    Close (Mem.Log_File.all);
+                                    Mem.Log_File_Open := False;
+                                 end if;
+                                 if Mem.Log_File = null then
+                                    Mem.Log_File :=
+                                       new Ada.Text_IO.File_Type;
+                                 end if;
+                                 if Mem.Log_Dir_Len > 0 then
+                                    declare
+                                       Dir  : constant String :=
+                                          Mem.Log_Dir (1 .. Mem.Log_Dir_Len);
+                                       Path : constant String :=
+                                          Dir & "/" & Name;
+                                    begin
+                                       if not Ada.Directories.Exists (Dir) then
+                                          Ada.Directories.Create_Path (Dir);
+                                       end if;
+                                       Create (Mem.Log_File.all,
+                                               Out_File, Path);
+                                    end;
+                                 else
+                                    Create (Mem.Log_File.all, Out_File, Name);
+                                 end if;
+                                 Mem.Log_File_Open := True;
+                                 Write_Register (CPU, 10, 0);
                               end if;
-                              Mem.Log_File_Open := True;
-                              Write_Register (CPU, 10, 0);
                            exception
                               when others =>
                                  Mem.Log_File_Open := False;
@@ -945,35 +1003,59 @@ package body RISCV.CPU is
                                     exit;
                                  end if;
                               end loop;
-                              if Handle >= 0 then
-                                 declare
-                                    H : constant Memory.SH_File_Index :=
-                                       Memory.SH_File_Index (Handle);
-                                 begin
-                                    if Mem.SH_Files (H) = null then
-                                       Mem.SH_Files (H) :=
-                                          new Ada.Streams.Stream_IO.File_Type;
-                                    end if;
-                                    case A2_Val is
-                                       when 1 =>
-                                          Create (Mem.SH_Files (H).all,
-                                                  Out_File, Path);
-                                       when 2 =>
-                                          Open (Mem.SH_Files (H).all,
-                                                Append_File, Path);
+                              --  Confine the guest-supplied path to the
+                              --  host I/O root before touching the host
+                              --  filesystem, and honour the access mode.
+                              declare
+                                 Host_Path : String
+                                    (1 .. Memory.Max_Host_Path +
+                                          Memory.Max_Host_Root + 1);
+                                 Host_Len  : Natural;
+                                 Permitted : Boolean;
+                              begin
+                                 Memory.Resolve_Host_Path
+                                   (Mem, Path,
+                                    Writing  => A2_Val = 1 or A2_Val = 2,
+                                    Full     => Host_Path,
+                                    Full_Len => Host_Len,
+                                    Allowed  => Permitted);
+                                 if not Permitted then
+                                    Handle := -1;
+                                 end if;
+
+                                 if Handle >= 0 then
+                                    declare
+                                       H : constant Memory.SH_File_Index :=
+                                          Memory.SH_File_Index (Handle);
+                                       P : constant String :=
+                                          Host_Path (1 .. Host_Len);
+                                    begin
+                                       if Mem.SH_Files (H) = null then
+                                          Mem.SH_Files (H) :=
+                                             new Ada.Streams.Stream_IO
+                                                    .File_Type;
+                                       end if;
+                                       case A2_Val is
+                                          when 1 =>
+                                             Create (Mem.SH_Files (H).all,
+                                                     Out_File, P);
+                                          when 2 =>
+                                             Open (Mem.SH_Files (H).all,
+                                                   Append_File, P);
+                                          when others =>
+                                             Open (Mem.SH_Files (H).all,
+                                                   In_File, P);
+                                       end case;
+                                       Mem.SH_File_Open (H) := True;
+                                       Write_Register (CPU, 10, Word (Handle));
+                                    exception
                                        when others =>
-                                          Open (Mem.SH_Files (H).all,
-                                                In_File, Path);
-                                    end case;
-                                    Mem.SH_File_Open (H) := True;
-                                    Write_Register (CPU, 10, Word (Handle));
-                                 exception
-                                    when others =>
-                                       Write_Register (CPU, 10, Word'Last);
-                                 end;
-                              else
-                                 Write_Register (CPU, 10, Word'Last);
-                              end if;
+                                          Write_Register (CPU, 10, Word'Last);
+                                    end;
+                                 else
+                                    Write_Register (CPU, 10, Word'Last);
+                                 end if;
+                              end;
                            end;
                            Is_Host_Call := True;
 
@@ -2917,6 +2999,7 @@ package body RISCV.CPU is
          when OPCODE_LOAD_FP =>
             Address := Memory_Address
               (To_Word (To_Signed (Rs1_Val) + Decoded.Imm_I));
+            Memory.Clear_Access_Fault (Mem);
 
             case Decoded.Funct3 is
                when FUNCT3_FLH =>
@@ -3020,10 +3103,20 @@ package body RISCV.CPU is
                   return;
             end case;
 
+            --  Covers the vector loads too: they touch many bytes and the
+            --  fault record keeps the first failing one.
+            if Memory.Pending_Fault (Mem) /= Memory.OK then
+               CPU.Exception_Code := Load_Access_Fault;
+               Trap_Entry (CPU, CSR.CAUSE_LOAD_ACCESS_FAULT,
+                           Word (Memory.Pending_Fault_Address (Mem)));
+               return;
+            end if;
+
          --  Vector stores use STORE_FP opcode
          when OPCODE_STORE_FP =>
             Address := Memory_Address
               (To_Word (To_Signed (Rs1_Val) + Decoded.Imm_S));
+            Memory.Clear_Access_Fault (Mem);
 
             case Decoded.Funct3 is
                when FUNCT3_FSH =>
@@ -3123,6 +3216,14 @@ package body RISCV.CPU is
                   return;
             end case;
 
+            --  Covers the vector stores too.
+            if Memory.Pending_Fault (Mem) /= Memory.OK then
+               CPU.Exception_Code := Store_Access_Fault;
+               Trap_Entry (CPU, CSR.CAUSE_STORE_ACCESS_FAULT,
+                           Word (Memory.Pending_Fault_Address (Mem)));
+               return;
+            end if;
+
          ----------------------------------
          -- A Extension (Atomic Memory Ops)
          ----------------------------------
@@ -3141,6 +3242,7 @@ package body RISCV.CPU is
 
                --  Address from rs1
                Address := Memory_Address (Rs1_Val);
+               Memory.Clear_Access_Fault (Mem);
 
                case Funct5 is
                   --  LR.W: Load Reserved Word
@@ -3249,6 +3351,16 @@ package body RISCV.CPU is
                      Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
                      return;
                end case;
+
+               --  An atomic that could not reach memory faults as a store,
+               --  which is what the ISA specifies for AMOs regardless of
+               --  which half of the read-modify-write failed.
+               if Memory.Pending_Fault (Mem) /= Memory.OK then
+                  CPU.Exception_Code := Store_Access_Fault;
+                  Trap_Entry (CPU, CSR.CAUSE_STORE_ACCESS_FAULT,
+                              Word (Memory.Pending_Fault_Address (Mem)));
+                  return;
+               end if;
             end;
 
          -------------------------------------------

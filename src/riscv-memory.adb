@@ -197,6 +197,33 @@ package body RISCV.Memory is
          return;  --  Invalid size
       end if;
 
+      --  Reject a region that would wrap past the top of the address space.
+      --  Base + Size is computed in modular arithmetic, so the wrap is
+      --  silent; Find_Region handles a region ending exactly at 2**32 but
+      --  a region extending beyond it has no consistent meaning.
+      if Memory_Address'Last - Base < Memory_Address (Size) - 1 then
+         return;
+      end if;
+
+      --  Reject a region overlapping one already registered. Without this
+      --  the first match in Find_Region silently wins and the second region
+      --  is partly or wholly unreachable.
+      for I in 0 .. Mem.Region_Count - 1 loop
+         declare
+            R : Memory_Region renames Mem.Regions (Region_Index (I));
+         begin
+            if Base <= R.Base then
+               if Memory_Address (Size) > R.Base - Base then
+                  return;  --  New region runs into the existing one
+               end if;
+            else
+               if Memory_Address (R.Size) > Base - R.Base then
+                  return;  --  Existing region runs into the new one
+               end if;
+            end if;
+         end;
+      end loop;
+
       Idx := Region_Index (Mem.Region_Count);
       Data_Len := Natural (Size);
 
@@ -215,12 +242,31 @@ package body RISCV.Memory is
    function Find_Region (Mem     : Memory_Unit;
                          Address : Memory_Address) return Natural is
    begin
+      --  Try the previously matched region first. Fetch and data access are
+      --  both local, so this is nearly always the answer and saves the scan.
+      if Mem.Region_Hint < Mem.Region_Count then
+         declare
+            R : Memory_Region renames
+               Mem.Regions (Region_Index (Mem.Region_Hint));
+         begin
+            if Address >= R.Base
+              and then Address - R.Base < Memory_Address (R.Size)
+            then
+               return Mem.Region_Hint;
+            end if;
+         end;
+      end if;
+
       for I in 0 .. Mem.Region_Count - 1 loop
          declare
             R : Memory_Region renames Mem.Regions (Region_Index (I));
          begin
+            --  Compare as an offset rather than against R.Base + R.Size:
+            --  Memory_Address is modular, so the sum wraps to 0 for a region
+            --  that ends exactly at the top of the address space and the
+            --  region would never match.
             if Address >= R.Base and then
-               Address < R.Base + Memory_Address (R.Size)
+               Address - R.Base < Memory_Address (R.Size)
             then
                return I;
             end if;
@@ -259,7 +305,8 @@ package body RISCV.Memory is
 
       while not End_Of_File (File) loop
          Byte'Read (Stream, B);
-         Write_Byte (Mem, Addr, B);
+         --  Raw: the image may legitimately populate a ROM region.
+         Write_Byte_Raw (Mem, Addr, B);
          if Mem.Last_Result /= OK then
             Close (File);
             return;
@@ -282,6 +329,23 @@ package body RISCV.Memory is
    --  Read Operations
    --  ========================================================================
 
+   ------------------
+   -- Record_Fault --
+   ------------------
+
+   --  Set Last_Result and, if this is the first failure of the current
+   --  access group, latch it for the CPU to act on.
+   procedure Record_Fault (Mem     : in out Memory_Unit;
+                           Result  : Access_Result;
+                           Address : Memory_Address) is
+   begin
+      Mem.Last_Result := Result;
+      if Mem.Fault_Result = OK then
+         Mem.Fault_Result  := Result;
+         Mem.Fault_Address := Address;
+      end if;
+   end Record_Fault;
+
    function Read_Byte (Mem     : in out Memory_Unit;
                        Address : Memory_Address) return Byte is
    begin
@@ -300,65 +364,72 @@ package body RISCV.Memory is
          Mem.Access_Hook (Address, Is_Write => False);
       end if;
 
-      --  Check for peripheral access first
-      if Mem.UART /= null and then
-         RISCV.UART.Is_UART_Address (Mem.UART.all, Address)
+      --  Check for peripheral access first. Two comparisons rule out
+      --  the whole MMIO block for the RAM accesses that dominate.
+      if Mem.Periph_Count > 0
+        and then Address >= Mem.Periph_Min
+        and then Address <= Mem.Periph_Max
       then
-         return RISCV.UART.Read (Mem.UART.all, Address);
-      end if;
+         if Mem.UART /= null and then
+            RISCV.UART.Is_UART_Address (Mem.UART.all, Address)
+         then
+            return RISCV.UART.Read (Mem.UART.all, Address);
+         end if;
 
-      if Mem.CLINT /= null and then
-         RISCV.CLINT.Is_CLINT_Address (Mem.CLINT.all, Address)
-      then
-         return RISCV.CLINT.Read_Byte (Mem.CLINT.all, Address);
-      end if;
+         if Mem.CLINT /= null and then
+            RISCV.CLINT.Is_CLINT_Address (Mem.CLINT.all, Address)
+         then
+            return RISCV.CLINT.Read_Byte (Mem.CLINT.all, Address);
+         end if;
 
-      if Mem.GPIO /= null and then
-         RISCV.GPIO.Is_GPIO_Address (Mem.GPIO.all, Address)
-      then
-         return RISCV.GPIO.Read_Byte (Mem.GPIO.all, Address);
-      end if;
+         if Mem.GPIO /= null and then
+            RISCV.GPIO.Is_GPIO_Address (Mem.GPIO.all, Address)
+         then
+            return RISCV.GPIO.Read_Byte (Mem.GPIO.all, Address);
+         end if;
 
-      if Mem.SPI /= null and then
-         RISCV.SPI.Is_SPI_Address (Mem.SPI.all, Address)
-      then
-         return RISCV.SPI.Read_Byte (Mem.SPI.all, Address);
-      end if;
+         if Mem.SPI /= null and then
+            RISCV.SPI.Is_SPI_Address (Mem.SPI.all, Address)
+         then
+            return RISCV.SPI.Read_Byte (Mem.SPI.all, Address);
+         end if;
 
-      if Mem.I2C /= null and then
-         RISCV.I2C.Is_I2C_Address (Mem.I2C.all, Address)
-      then
-         return RISCV.I2C.Read_Byte (Mem.I2C.all, Address);
-      end if;
+         if Mem.I2C /= null and then
+            RISCV.I2C.Is_I2C_Address (Mem.I2C.all, Address)
+         then
+            return RISCV.I2C.Read_Byte (Mem.I2C.all, Address);
+         end if;
 
-      if Mem.Timer /= null and then
-         RISCV.Timer.Is_Timer_Address (Mem.Timer.all, Address)
-      then
-         return RISCV.Timer.Read_Byte (Mem.Timer.all, Address);
-      end if;
+         if Mem.Timer /= null and then
+            RISCV.Timer.Is_Timer_Address (Mem.Timer.all, Address)
+         then
+            return RISCV.Timer.Read_Byte (Mem.Timer.all, Address);
+         end if;
 
-      if Mem.Watchdog /= null and then
-         RISCV.Watchdog.Is_Watchdog_Address (Mem.Watchdog.all, Address)
-      then
-         return RISCV.Watchdog.Read_Byte (Mem.Watchdog.all, Address);
-      end if;
+         if Mem.Watchdog /= null and then
+            RISCV.Watchdog.Is_Watchdog_Address (Mem.Watchdog.all, Address)
+         then
+            return RISCV.Watchdog.Read_Byte (Mem.Watchdog.all, Address);
+         end if;
 
-      if Mem.DMA /= null and then
-         RISCV.DMA.Is_DMA_Address (Mem.DMA.all, Address)
-      then
-         return RISCV.DMA.Read_Byte (Mem.DMA.all, Address);
-      end if;
+         if Mem.DMA /= null and then
+            RISCV.DMA.Is_DMA_Address (Mem.DMA.all, Address)
+         then
+            return RISCV.DMA.Read_Byte (Mem.DMA.all, Address);
+         end if;
 
-      if Mem.PLIC /= null and then
-         RISCV.PLIC.Is_PLIC_Address (Mem.PLIC.all, Address)
-      then
-         return RISCV.PLIC.Read_Byte (Mem.PLIC.all, Address);
-      end if;
+         if Mem.PLIC /= null and then
+            RISCV.PLIC.Is_PLIC_Address (Mem.PLIC.all, Address)
+         then
+            return RISCV.PLIC.Read_Byte (Mem.PLIC.all, Address);
+         end if;
 
-      if Mem.VirtIO_Blk /= null and then
-         RISCV.VirtIO_Block.Is_VirtIO_Block_Address (Mem.VirtIO_Blk.all, Address)
-      then
-         return RISCV.VirtIO_Block.Read_Byte (Mem.VirtIO_Blk.all, Address);
+         if Mem.VirtIO_Blk /= null and then
+            RISCV.VirtIO_Block.Is_VirtIO_Block_Address (Mem.VirtIO_Blk.all, Address)
+         then
+            return RISCV.VirtIO_Block.Read_Byte (Mem.VirtIO_Blk.all, Address);
+         end if;
+
       end if;
 
       --  Legacy flat memory mode
@@ -367,7 +438,7 @@ package body RISCV.Memory is
             --  Out of range must report Unmapped.  Wrapping the address into
             --  the array instead would alias every access past the end of
             --  memory onto a valid byte, silently reading or corrupting it.
-            Mem.Last_Result := Unmapped;
+            Record_Fault (Mem, Unmapped, Address);
             return 0;
          end if;
          return Mem.Data (Natural (Address));
@@ -378,16 +449,17 @@ package body RISCV.Memory is
          Idx : constant Natural := Find_Region (Mem, Address);
       begin
          if Idx >= Mem.Region_Count then
-            Mem.Last_Result := Unmapped;
+            Record_Fault (Mem, Unmapped, Address);
             return 0;
          end if;
+         Mem.Region_Hint := Idx;
 
          declare
             R      : Memory_Region renames Mem.Regions (Region_Index (Idx));
             Offset : constant Natural := Natural (Address - R.Base);
          begin
             if not R.Perm.Read then
-               Mem.Last_Result := Permission_Error;
+               Record_Fault (Mem, Permission_Error, Address);
                return 0;
             end if;
             return R.Data (Offset);
@@ -395,37 +467,167 @@ package body RISCV.Memory is
       end;
    end Read_Byte;
 
+   --------------------
+   -- Direct_Block    --
+   --------------------
+
+   --  Locate Count consecutive bytes that can be reached straight out of a
+   --  region's storage, bypassing the per-byte dispatch. Fails (Ok = False)
+   --  whenever anything makes the slow path necessary: watchpoint tracking,
+   --  a hook, MMIO overlap, legacy flat memory, an unmapped or straddling
+   --  access, or a region the access is not permitted on.
+   procedure Direct_Block (Mem     : in out Memory_Unit;
+                           Address : Memory_Address;
+                           Count   : Memory_Address;
+                           Writing : Boolean;
+                           Region  : out Natural;
+                           Offset  : out Natural;
+                           Ok      : out Boolean) is
+   begin
+      Region := 0;
+      Offset := 0;
+      Ok     := False;
+
+      if Mem.Track_Access
+        or else Mem.Access_Hook /= null
+        or else not Mem.Use_Regions
+      then
+         return;
+      end if;
+
+      --  Any overlap with the MMIO span goes the long way round.
+      if Mem.Periph_Count > 0
+        and then Address + (Count - 1) >= Mem.Periph_Min
+        and then Address <= Mem.Periph_Max
+      then
+         return;
+      end if;
+
+      declare
+         Idx : constant Natural := Find_Region (Mem, Address);
+      begin
+         if Idx >= Mem.Region_Count then
+            return;
+         end if;
+         declare
+            R   : Memory_Region renames Mem.Regions (Region_Index (Idx));
+            Off : constant Memory_Address := Address - R.Base;
+         begin
+            --  The whole access must fit in this one region: a word
+            --  straddling a boundary must fault, not silently mix bytes.
+            if Off + (Count - 1) >= Memory_Address (R.Size) then
+               return;
+            end if;
+            if (Writing and then not R.Perm.Write)
+              or else (not Writing and then not R.Perm.Read)
+            then
+               return;
+            end if;
+            Mem.Region_Hint := Idx;
+            Region := Idx;
+            Offset := Natural (Off);
+            Ok     := True;
+         end;
+      end;
+   end Direct_Block;
+
    function Read_Half_Word (Mem     : in out Memory_Unit;
                             Address : Memory_Address) return Half_Word is
-      Lo : constant Byte := Read_Byte (Mem, Address);
-      Hi : constant Byte := Read_Byte (Mem, Address + 1);
+      Reg  : Natural;
+      Off  : Natural;
+      Fast : Boolean;
    begin
-      --  Correct Last_Access_Addr to base address (byte reads leave it at +1)
-      if Mem.Track_Access then
-         Mem.Last_Access_Addr := Address;
-         Mem.Last_Access_Valid := True;
+      Direct_Block (Mem, Address, 2, False, Reg, Off, Fast);
+      if Fast then
+         Mem.Last_Result := OK;
+         declare
+            D : Region_Data renames Mem.Regions (Region_Index (Reg)).Data.all;
+         begin
+            return Half_Word (D (Off)) or Shift_Left (Half_Word (D (Off + 1)), 8);
+         end;
       end if;
-      --  Little-endian
-      return Half_Word (Lo) or Shift_Left (Half_Word (Hi), 8);
+
+      declare
+         Lo : constant Byte := Read_Byte (Mem, Address);
+         Hi : constant Byte := Read_Byte (Mem, Address + 1);
+      begin
+         --  Correct Last_Access_Addr to base (byte reads leave it at +1)
+         if Mem.Track_Access then
+            Mem.Last_Access_Addr := Address;
+            Mem.Last_Access_Valid := True;
+         end if;
+         --  Little-endian
+         return Half_Word (Lo) or Shift_Left (Half_Word (Hi), 8);
+      end;
    end Read_Half_Word;
+
+   procedure Read_Insn_Halves (Mem     : in out Memory_Unit;
+                               Address : Memory_Address;
+                               Lo      : out Half_Word;
+                               Hi      : out Half_Word;
+                               Both    : out Boolean) is
+      Reg  : Natural;
+      Off  : Natural;
+      Fast : Boolean;
+   begin
+      Direct_Block (Mem, Address, 4, False, Reg, Off, Fast);
+      if Fast then
+         Mem.Last_Result := OK;
+         declare
+            D : Region_Data renames Mem.Regions (Region_Index (Reg)).Data.all;
+         begin
+            Lo := Half_Word (D (Off)) or
+                  Shift_Left (Half_Word (D (Off + 1)), 8);
+            Hi := Half_Word (D (Off + 2)) or
+                  Shift_Left (Half_Word (D (Off + 3)), 8);
+         end;
+         Both := True;
+         return;
+      end if;
+
+      --  Either MMIO, legacy memory, tracking, or a 32-bit fetch running
+      --  off the end of a region -- read only the half we are sure about.
+      Lo   := Read_Half_Word (Mem, Address);
+      Hi   := 0;
+      Both := False;
+   end Read_Insn_Halves;
 
    function Read_Word (Mem     : in out Memory_Unit;
                        Address : Memory_Address) return Word is
-      B0 : constant Byte := Read_Byte (Mem, Address);
-      B1 : constant Byte := Read_Byte (Mem, Address + 1);
-      B2 : constant Byte := Read_Byte (Mem, Address + 2);
-      B3 : constant Byte := Read_Byte (Mem, Address + 3);
+      Reg  : Natural;
+      Off  : Natural;
+      Fast : Boolean;
    begin
-      --  Correct Last_Access_Addr to base address (byte reads leave it at +3)
-      if Mem.Track_Access then
-         Mem.Last_Access_Addr := Address;
-         Mem.Last_Access_Valid := True;
+      Direct_Block (Mem, Address, 4, False, Reg, Off, Fast);
+      if Fast then
+         Mem.Last_Result := OK;
+         declare
+            D : Region_Data renames Mem.Regions (Region_Index (Reg)).Data.all;
+         begin
+            return Word (D (Off)) or
+                   Shift_Left (Word (D (Off + 1)), 8) or
+                   Shift_Left (Word (D (Off + 2)), 16) or
+                   Shift_Left (Word (D (Off + 3)), 24);
+         end;
       end if;
-      --  Little-endian
-      return Word (B0) or
-             Shift_Left (Word (B1), 8) or
-             Shift_Left (Word (B2), 16) or
-             Shift_Left (Word (B3), 24);
+
+      declare
+         B0 : constant Byte := Read_Byte (Mem, Address);
+         B1 : constant Byte := Read_Byte (Mem, Address + 1);
+         B2 : constant Byte := Read_Byte (Mem, Address + 2);
+         B3 : constant Byte := Read_Byte (Mem, Address + 3);
+      begin
+         --  Correct Last_Access_Addr to base (byte reads leave it at +3)
+         if Mem.Track_Access then
+            Mem.Last_Access_Addr := Address;
+            Mem.Last_Access_Valid := True;
+         end if;
+         --  Little-endian
+         return Word (B0) or
+                Shift_Left (Word (B1), 8) or
+                Shift_Left (Word (B2), 16) or
+                Shift_Left (Word (B3), 24);
+      end;
    end Read_Word;
 
    --  ========================================================================
@@ -585,78 +787,85 @@ package body RISCV.Memory is
          Mem.Access_Hook (Address, Is_Write => True);
       end if;
 
-      --  Check for peripheral access first
-      if Mem.UART /= null and then
-         RISCV.UART.Is_UART_Address (Mem.UART.all, Address)
+      --  Check for peripheral access first. Two comparisons rule out
+      --  the whole MMIO block for the RAM accesses that dominate.
+      if Mem.Periph_Count > 0
+        and then Address >= Mem.Periph_Min
+        and then Address <= Mem.Periph_Max
       then
-         RISCV.UART.Write (Mem.UART.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.CLINT /= null and then
-         RISCV.CLINT.Is_CLINT_Address (Mem.CLINT.all, Address)
-      then
-         RISCV.CLINT.Write_Byte (Mem.CLINT.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.GPIO /= null and then
-         RISCV.GPIO.Is_GPIO_Address (Mem.GPIO.all, Address)
-      then
-         RISCV.GPIO.Write_Byte (Mem.GPIO.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.SPI /= null and then
-         RISCV.SPI.Is_SPI_Address (Mem.SPI.all, Address)
-      then
-         RISCV.SPI.Write_Byte (Mem.SPI.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.I2C /= null and then
-         RISCV.I2C.Is_I2C_Address (Mem.I2C.all, Address)
-      then
-         RISCV.I2C.Write_Byte (Mem.I2C.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.Timer /= null and then
-         RISCV.Timer.Is_Timer_Address (Mem.Timer.all, Address)
-      then
-         RISCV.Timer.Write_Byte (Mem.Timer.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.Watchdog /= null and then
-         RISCV.Watchdog.Is_Watchdog_Address (Mem.Watchdog.all, Address)
-      then
-         RISCV.Watchdog.Write_Byte (Mem.Watchdog.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.DMA /= null and then
-         RISCV.DMA.Is_DMA_Address (Mem.DMA.all, Address)
-      then
-         RISCV.DMA.Write_Byte (Mem.DMA.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.PLIC /= null and then
-         RISCV.PLIC.Is_PLIC_Address (Mem.PLIC.all, Address)
-      then
-         RISCV.PLIC.Write_Byte (Mem.PLIC.all, Address, Value);
-         return;
-      end if;
-
-      if Mem.VirtIO_Blk /= null and then
-         RISCV.VirtIO_Block.Is_VirtIO_Block_Address (Mem.VirtIO_Blk.all, Address)
-      then
-         RISCV.VirtIO_Block.Write_Byte (Mem.VirtIO_Blk.all, Address, Value);
-         if Mem.VirtIO_Blk.Notify_Pending then
-            Process_VirtIO_Queue (Mem);
+         if Mem.UART /= null and then
+            RISCV.UART.Is_UART_Address (Mem.UART.all, Address)
+         then
+            RISCV.UART.Write (Mem.UART.all, Address, Value);
+            return;
          end if;
-         return;
+
+         if Mem.CLINT /= null and then
+            RISCV.CLINT.Is_CLINT_Address (Mem.CLINT.all, Address)
+         then
+            RISCV.CLINT.Write_Byte (Mem.CLINT.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.GPIO /= null and then
+            RISCV.GPIO.Is_GPIO_Address (Mem.GPIO.all, Address)
+         then
+            RISCV.GPIO.Write_Byte (Mem.GPIO.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.SPI /= null and then
+            RISCV.SPI.Is_SPI_Address (Mem.SPI.all, Address)
+         then
+            RISCV.SPI.Write_Byte (Mem.SPI.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.I2C /= null and then
+            RISCV.I2C.Is_I2C_Address (Mem.I2C.all, Address)
+         then
+            RISCV.I2C.Write_Byte (Mem.I2C.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.Timer /= null and then
+            RISCV.Timer.Is_Timer_Address (Mem.Timer.all, Address)
+         then
+            RISCV.Timer.Write_Byte (Mem.Timer.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.Watchdog /= null and then
+            RISCV.Watchdog.Is_Watchdog_Address (Mem.Watchdog.all, Address)
+         then
+            RISCV.Watchdog.Write_Byte (Mem.Watchdog.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.DMA /= null and then
+            RISCV.DMA.Is_DMA_Address (Mem.DMA.all, Address)
+         then
+            RISCV.DMA.Write_Byte (Mem.DMA.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.PLIC /= null and then
+            RISCV.PLIC.Is_PLIC_Address (Mem.PLIC.all, Address)
+         then
+            RISCV.PLIC.Write_Byte (Mem.PLIC.all, Address, Value);
+            return;
+         end if;
+
+         if Mem.VirtIO_Blk /= null and then
+            RISCV.VirtIO_Block.Is_VirtIO_Block_Address (Mem.VirtIO_Blk.all, Address)
+         then
+            RISCV.VirtIO_Block.Write_Byte (Mem.VirtIO_Blk.all, Address, Value);
+            if Mem.VirtIO_Blk.Notify_Pending then
+               Process_VirtIO_Queue (Mem);
+            end if;
+            return;
+         end if;
+
       end if;
 
       --  Legacy flat memory mode
@@ -664,7 +873,7 @@ package body RISCV.Memory is
          if Mem.Data = null or else not Is_Valid_Address (Address) then
             --  See Read_Byte: out of range is Unmapped, never a wrapped
             --  write onto an unrelated byte.
-            Mem.Last_Result := Unmapped;
+            Record_Fault (Mem, Unmapped, Address);
             return;
          end if;
          Mem.Data (Natural (Address)) := Value;
@@ -676,20 +885,21 @@ package body RISCV.Memory is
          Idx : constant Natural := Find_Region (Mem, Address);
       begin
          if Idx >= Mem.Region_Count then
-            Mem.Last_Result := Unmapped;
+            Record_Fault (Mem, Unmapped, Address);
             return;
          end if;
+         Mem.Region_Hint := Idx;
 
          declare
             R      : Memory_Region renames Mem.Regions (Region_Index (Idx));
             Offset : constant Natural := Natural (Address - R.Base);
          begin
             if not R.Perm.Write then
-               --  ROM/Flash: silently ignore writes (or could set error)
-               if R.Rtype = ROM or R.Rtype = Flash then
-                  return;  --  Silent ignore for ROM
-               end if;
-               Mem.Last_Result := Permission_Error;
+               --  A guest store to ROM or flash is an error, not a no-op:
+               --  silently dropping it hides exactly the bug an emulator is
+               --  run to find. Loaders populating a ROM image use
+               --  Write_Byte_Raw instead.
+               Record_Fault (Mem, Permission_Error, Address);
                return;
             end if;
             R.Data (Offset) := Value;
@@ -700,7 +910,22 @@ package body RISCV.Memory is
    procedure Write_Half_Word (Mem     : in out Memory_Unit;
                               Address : Memory_Address;
                               Value   : Half_Word) is
+      Reg  : Natural;
+      Off  : Natural;
+      Fast : Boolean;
    begin
+      Direct_Block (Mem, Address, 2, True, Reg, Off, Fast);
+      if Fast then
+         Mem.Last_Result := OK;
+         declare
+            D : Region_Data renames Mem.Regions (Region_Index (Reg)).Data.all;
+         begin
+            D (Off)     := Byte (Value and 16#FF#);
+            D (Off + 1) := Byte (Shift_Right (Value, 8) and 16#FF#);
+         end;
+         return;
+      end if;
+
       --  Little-endian
       Write_Byte (Mem, Address, Byte (Value and 16#FF#));
       Write_Byte (Mem, Address + 1, Byte (Shift_Right (Value, 8) and 16#FF#));
@@ -714,7 +939,29 @@ package body RISCV.Memory is
    procedure Write_Word (Mem     : in out Memory_Unit;
                          Address : Memory_Address;
                          Value   : Word) is
+      Reg  : Natural;
+      Off  : Natural;
+      Fast : Boolean;
    begin
+      Direct_Block (Mem, Address, 4, True, Reg, Off, Fast);
+      if Fast then
+         Mem.Last_Result := OK;
+         declare
+            D : Region_Data renames Mem.Regions (Region_Index (Reg)).Data.all;
+         begin
+            D (Off)     := Byte (Value and 16#FF#);
+            D (Off + 1) := Byte (Shift_Right (Value, 8) and 16#FF#);
+            D (Off + 2) := Byte (Shift_Right (Value, 16) and 16#FF#);
+            D (Off + 3) := Byte (Shift_Right (Value, 24) and 16#FF#);
+         end;
+         --  HTIF tohost still has to be seen on the fast path.
+         if Mem.HTIF_Enabled and then Address = Mem.Tohost_Addr then
+            Mem.Tohost_Value := Value;
+            Mem.Tohost_Written := True;
+         end if;
+         return;
+      end if;
+
       --  Little-endian
       Write_Byte (Mem, Address, Byte (Value and 16#FF#));
       Write_Byte (Mem, Address + 1, Byte (Shift_Right (Value, 8) and 16#FF#));
@@ -750,9 +997,178 @@ package body RISCV.Memory is
       return Mem.Last_Result;
    end Last_Access_Result;
 
+   procedure Clear_Access_Fault (Mem : in out Memory_Unit) is
+   begin
+      Mem.Fault_Result  := OK;
+      Mem.Fault_Address := 0;
+   end Clear_Access_Fault;
+
+   function Pending_Fault (Mem : Memory_Unit) return Access_Result is
+   begin
+      if not Mem.Fault_Traps then
+         return OK;
+      end if;
+      return Mem.Fault_Result;
+   end Pending_Fault;
+
+   function Pending_Fault_Address (Mem : Memory_Unit) return Memory_Address is
+   begin
+      return Mem.Fault_Address;
+   end Pending_Fault_Address;
+
+   procedure Write_Byte_Raw (Mem     : in out Memory_Unit;
+                             Address : Memory_Address;
+                             Value   : Byte) is
+   begin
+      if not Mem.Use_Regions then
+         if Mem.Data = null or else not Is_Valid_Address (Address) then
+            Mem.Last_Result := Unmapped;
+            return;
+         end if;
+         Mem.Data (Natural (Address)) := Value;
+         Mem.Last_Result := OK;
+         return;
+      end if;
+
+      declare
+         Idx : constant Natural := Find_Region (Mem, Address);
+      begin
+         if Idx >= Mem.Region_Count then
+            Mem.Last_Result := Unmapped;
+            return;
+         end if;
+         declare
+            R      : Memory_Region renames Mem.Regions (Region_Index (Idx));
+            Offset : constant Natural := Natural (Address - R.Base);
+         begin
+            R.Data (Offset) := Value;
+            Mem.Last_Result := OK;
+         end;
+      end;
+   end Write_Byte_Raw;
+
+   -----------------------
+   -- Resolve_Host_Path --
+   -----------------------
+
+   function Valid_Host_Name (Path : String) return Boolean is
+
+      --  True if Path (First .. Last) is exactly ".."
+      function Is_Parent (First, Last : Natural) return Boolean is
+      begin
+         return Last = First + 1
+           and then Path (First) = '.'
+           and then Path (First + 1) = '.';
+      end Is_Parent;
+
+      Seg_Start : Natural;
+   begin
+      --  Non-empty, not absolute, and no NUL (which would truncate the name
+      --  the OS actually sees).
+      if Path'Length = 0 or else Path'Length > Max_Host_Path then
+         return False;
+      end if;
+      if Path (Path'First) = '/' then
+         return False;
+      end if;
+      for I in Path'Range loop
+         if Path (I) = ASCII.NUL then
+            return False;
+         end if;
+      end loop;
+
+      --  No ".." component.
+      Seg_Start := Path'First;
+      for I in Path'Range loop
+         if Path (I) = '/' then
+            if I > Seg_Start and then Is_Parent (Seg_Start, I - 1) then
+               return False;
+            end if;
+            Seg_Start := I + 1;
+         end if;
+      end loop;
+      if Seg_Start <= Path'Last
+        and then Is_Parent (Seg_Start, Path'Last)
+      then
+         return False;
+      end if;
+
+      return True;
+   end Valid_Host_Name;
+
+   procedure Resolve_Host_Path (Mem      : Memory_Unit;
+                                Path     : String;
+                                Writing  : Boolean;
+                                Full     : out String;
+                                Full_Len : out Natural;
+                                Allowed  : out Boolean) is
+   begin
+      Full     := (others => ' ');
+      Full_Len := 0;
+      Allowed  := False;
+
+      --  Policy gate
+      case Mem.Host_IO is
+         when Off =>
+            return;
+         when Read_Only =>
+            if Writing then
+               return;
+            end if;
+         when Read_Write =>
+            null;
+      end case;
+
+      if not Valid_Host_Name (Path) then
+         return;
+      end if;
+
+      --  Prefix the root. An empty root means the working directory, which
+      --  "./" already denotes, so no special case is needed.
+      declare
+         Root : constant String :=
+            (if Mem.Host_Root_Len > 0
+             then Mem.Host_Root (1 .. Mem.Host_Root_Len)
+             else ".");
+         Joined : constant String := Root & "/" & Path;
+      begin
+         if Joined'Length > Full'Length then
+            return;
+         end if;
+         Full (Full'First .. Full'First + Joined'Length - 1) := Joined;
+         Full_Len := Joined'Length;
+         Allowed  := True;
+      end;
+   end Resolve_Host_Path;
+
    --  ========================================================================
    --  UART Control
    --  ========================================================================
+
+   ---------------------
+   -- Note_Peripheral --
+   ---------------------
+
+   --  Widen the MMIO bounding span to include a peripheral at Base. The
+   --  pad covers the largest register block any of them uses (the PLIC's
+   --  is 64 MB); overshooting only costs the byte-access fast path.
+   Periph_Span_Pad : constant Memory_Address := 16#0400_0000#;
+
+   procedure Note_Peripheral (Mem : in out Memory_Unit; Base : Memory_Address)
+   is
+      Hi : constant Memory_Address :=
+         (if Memory_Address'Last - Base < Periph_Span_Pad
+          then Memory_Address'Last
+          else Base + Periph_Span_Pad);
+   begin
+      Mem.Periph_Count := Mem.Periph_Count + 1;
+      if Base < Mem.Periph_Min then
+         Mem.Periph_Min := Base;
+      end if;
+      if Hi > Mem.Periph_Max then
+         Mem.Periph_Max := Hi;
+      end if;
+   end Note_Peripheral;
 
    procedure Enable_UART (Mem  : in out Memory_Unit;
                           Base : Memory_Address := UART.Default_Base_Address) is
@@ -761,6 +1177,7 @@ package body RISCV.Memory is
          Mem.UART := new RISCV.UART.UART_State;
       end if;
       RISCV.UART.Initialize (Mem.UART.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_UART;
 
    procedure Disable_UART (Mem : in out Memory_Unit) is
@@ -800,6 +1217,7 @@ package body RISCV.Memory is
          Mem.CLINT := new RISCV.CLINT.CLINT_State;
       end if;
       RISCV.CLINT.Initialize (Mem.CLINT.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_CLINT;
 
    procedure Disable_CLINT (Mem : in out Memory_Unit) is
@@ -858,6 +1276,7 @@ package body RISCV.Memory is
          Mem.GPIO := new RISCV.GPIO.GPIO_State;
       end if;
       RISCV.GPIO.Initialize (Mem.GPIO.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_GPIO;
 
    procedure Disable_GPIO (Mem : in out Memory_Unit) is
@@ -913,6 +1332,7 @@ package body RISCV.Memory is
       if Mem.SPI /= null then
          RISCV.SPI.Initialize (Mem.SPI.all, Base);
       end if;
+      Note_Peripheral (Mem, Base);
    end Enable_SPI;
 
    procedure Disable_SPI (Mem : in out Memory_Unit) is
@@ -945,6 +1365,7 @@ package body RISCV.Memory is
       if Mem.I2C /= null then
          RISCV.I2C.Initialize (Mem.I2C.all, Base);
       end if;
+      Note_Peripheral (Mem, Base);
    end Enable_I2C;
 
    procedure Disable_I2C (Mem : in out Memory_Unit) is
@@ -978,6 +1399,7 @@ package body RISCV.Memory is
       if Mem.Timer /= null then
          RISCV.Timer.Initialize (Mem.Timer.all, Base);
       end if;
+      Note_Peripheral (Mem, Base);
    end Enable_Timer;
 
    procedure Disable_Timer (Mem : in out Memory_Unit) is
@@ -1018,6 +1440,7 @@ package body RISCV.Memory is
          Mem.Watchdog := new RISCV.Watchdog.Watchdog_State;
       end if;
       RISCV.Watchdog.Initialize (Mem.Watchdog.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_Watchdog;
 
    procedure Disable_Watchdog (Mem : in out Memory_Unit) is
@@ -1051,6 +1474,7 @@ package body RISCV.Memory is
          Mem.DMA := new RISCV.DMA.DMA_State;
       end if;
       RISCV.DMA.Initialize (Mem.DMA.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_DMA;
 
    procedure Disable_DMA (Mem : in out Memory_Unit) is
@@ -1096,6 +1520,7 @@ package body RISCV.Memory is
          Mem.PLIC := new RISCV.PLIC.PLIC_State;
       end if;
       RISCV.PLIC.Initialize (Mem.PLIC.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_PLIC;
 
    procedure Disable_PLIC (Mem : in out Memory_Unit) is
@@ -1162,6 +1587,7 @@ package body RISCV.Memory is
          Mem.VirtIO_Blk := new RISCV.VirtIO_Block.VirtIO_Block_State;
       end if;
       RISCV.VirtIO_Block.Initialize (Mem.VirtIO_Blk.all, Base);
+      Note_Peripheral (Mem, Base);
    end Enable_VirtIO_Block;
 
    procedure Disable_VirtIO_Block (Mem : in out Memory_Unit) is

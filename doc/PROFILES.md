@@ -116,8 +116,23 @@ vlen = 128
 | `type` | `ram`, `rom`, `flash` | Memory type |
 
 - **ram** - Read/write volatile memory
-- **rom** - Read-only (writes silently ignored)
-- **flash** - Read-only (for future programmability)
+- **rom** - Read-only; a guest store raises a store access fault (mcause 7)
+- **flash** - Read-only, same as `rom` (for future programmability)
+
+Permissions follow the `type` key, so a region declared `rom` is genuinely
+read-only. The program loader writes through the permission check, so an ELF
+or raw image may still populate a `rom` region.
+
+Regions are validated when the profile is applied. A region is rejected, with
+a warning naming it, when it:
+
+- has a zero size, or one above 256 MB (`Max_Region_Size`);
+- overlaps a region already registered - the first match would silently win
+  and part of the second would be unreachable;
+- runs past the end of the address space. A region ending *exactly* at 2^32
+  (for example base `0xFFF00000`, size `0x100000`) is fine and fully usable.
+
+There is room for 16 regions (`Max_Regions`).
 
 #### [peripheral.NAME]
 

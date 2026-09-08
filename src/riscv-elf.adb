@@ -269,6 +269,11 @@ package body RISCV.ELF is
       Header : ELF32_Header;
       Phdr   : ELF32_Phdr;
       B      : Byte;
+
+      --  Size of the file on disk, used to bound every offset taken from
+      --  the ELF headers. Without it a malformed P_Offset or P_Filesz only
+      --  fails on the eventual read past EOF, reported as a generic error.
+      File_Bytes : Ada.Streams.Stream_IO.Count := 0;
    begin
       --  Initialize info
       Info := (Entry_Point  => 0,
@@ -326,6 +331,7 @@ package body RISCV.ELF is
       end if;
 
       Info.Entry_Point := Header.E_Entry;
+      File_Bytes := Ada.Streams.Stream_IO.Size (File);
 
       if Verbose then
          Ada.Text_IO.Put_Line ("ELF Entry point: 0x" &
@@ -336,14 +342,44 @@ package body RISCV.ELF is
 
       --  Process program headers
       for I in 1 .. Natural (Header.E_Phnum) loop
-         --  Seek to program header
-         Set_Index (File, Positive_Count (Header.E_Phoff +
-            Word (I - 1) * Word (Header.E_Phentsize) + 1));
+         --  Seek to program header, checking it lies inside the file first
+         declare
+            Phdr_Off : constant Ada.Streams.Stream_IO.Count :=
+               Ada.Streams.Stream_IO.Count (Header.E_Phoff) +
+               Ada.Streams.Stream_IO.Count (I - 1) *
+               Ada.Streams.Stream_IO.Count (Header.E_Phentsize);
+         begin
+            if Phdr_Off > File_Bytes
+              or else Ada.Streams.Stream_IO.Count (Header.E_Phentsize) >
+                         File_Bytes - Phdr_Off
+            then
+               Close (File);
+               Result := Invalid_Format;
+               return;
+            end if;
+            Set_Index (File, Positive_Count (Phdr_Off + 1));
+         end;
 
          Read_Phdr (Stream, Phdr);
 
          --  Only process PT_LOAD segments
          if Phdr.P_Type = PT_LOAD then
+            --  Reject a segment that does not fit in the file, claims less
+            --  memory than file bytes, or whose span wraps the 32-bit
+            --  address space. All three are arithmetic hazards below.
+            if Ada.Streams.Stream_IO.Count (Phdr.P_Offset) > File_Bytes
+              or else Ada.Streams.Stream_IO.Count (Phdr.P_Filesz) >
+                         File_Bytes -
+                         Ada.Streams.Stream_IO.Count (Phdr.P_Offset)
+              or else Phdr.P_Memsz < Phdr.P_Filesz
+              or else (Phdr.P_Memsz > 0
+                       and then Phdr.P_Memsz - 1 > Word'Last - Phdr.P_Vaddr)
+            then
+               Close (File);
+               Result := Invalid_Format;
+               return;
+            end if;
+
             Info.Num_Segments := Info.Num_Segments + 1;
 
             if Verbose then
@@ -358,8 +394,12 @@ package body RISCV.ELF is
             if Phdr.P_Vaddr < Info.Load_Address then
                Info.Load_Address := Phdr.P_Vaddr;
             end if;
-            if Phdr.P_Vaddr + Phdr.P_Memsz > Info.End_Address then
-               Info.End_Address := Phdr.P_Vaddr + Phdr.P_Memsz;
+            if Phdr.P_Memsz > 0
+              and then Phdr.P_Vaddr + (Phdr.P_Memsz - 1) > Info.End_Address
+            then
+               --  Last byte, not one-past-the-end: the latter wraps to 0
+               --  for a segment ending exactly at the top of memory.
+               Info.End_Address := Phdr.P_Vaddr + (Phdr.P_Memsz - 1);
             end if;
 
             --  Load segment data from file
@@ -368,7 +408,7 @@ package body RISCV.ELF is
 
                for Offset in 0 .. Phdr.P_Filesz - 1 loop
                   Byte'Read (Stream, B);
-                  Memory.Write_Byte (Mem,
+                  Memory.Write_Byte_Raw (Mem,
                      Memory_Address (Phdr.P_Vaddr + Offset), B);
                end loop;
             end if;
@@ -376,7 +416,7 @@ package body RISCV.ELF is
             --  Zero-fill remainder (BSS)
             if Phdr.P_Memsz > Phdr.P_Filesz then
                for Offset in Phdr.P_Filesz .. Phdr.P_Memsz - 1 loop
-                  Memory.Write_Byte (Mem,
+                  Memory.Write_Byte_Raw (Mem,
                      Memory_Address (Phdr.P_Vaddr + Offset), 0);
                end loop;
             end if;
@@ -470,6 +510,9 @@ package body RISCV.ELF is
       Header : ELF64_Header;
       Phdr   : ELF64_Phdr;
       B      : Byte;
+
+      --  See Load_ELF: bounds every offset taken from the ELF headers.
+      File_Bytes : Ada.Streams.Stream_IO.Count := 0;
    begin
       Info := (Entry_Point  => 0,
                Num_Segments => 0,
@@ -520,6 +563,7 @@ package body RISCV.ELF is
       end if;
 
       Info.Entry_Point := Header.E_Entry;
+      File_Bytes := Ada.Streams.Stream_IO.Size (File);
 
       if Verbose then
          Ada.Text_IO.Put_Line ("ELF64 Entry point: 0x" &
@@ -529,13 +573,42 @@ package body RISCV.ELF is
       end if;
 
       for I in 1 .. Natural (Header.E_Phnum) loop
-         Set_Index (File, Positive_Count (
-            Header.E_Phoff +
-            Double_Word (I - 1) * Double_Word (Header.E_Phentsize) + 1));
+         declare
+            Phdr_Off : constant Ada.Streams.Stream_IO.Count :=
+               Ada.Streams.Stream_IO.Count (Header.E_Phoff) +
+               Ada.Streams.Stream_IO.Count (I - 1) *
+               Ada.Streams.Stream_IO.Count (Header.E_Phentsize);
+         begin
+            if Phdr_Off > File_Bytes
+              or else Ada.Streams.Stream_IO.Count (Header.E_Phentsize) >
+                         File_Bytes - Phdr_Off
+            then
+               Close (File);
+               Result := Invalid_Format;
+               return;
+            end if;
+            Set_Index (File, Positive_Count (Phdr_Off + 1));
+         end;
 
          Read_Phdr64 (Stream, Phdr);
 
          if Phdr.P_Type = PT_LOAD then
+            --  See Load_ELF: the segment must fit in the file and must not
+            --  wrap the 64-bit address space.
+            if Ada.Streams.Stream_IO.Count (Phdr.P_Offset) > File_Bytes
+              or else Ada.Streams.Stream_IO.Count (Phdr.P_Filesz) >
+                         File_Bytes -
+                         Ada.Streams.Stream_IO.Count (Phdr.P_Offset)
+              or else Phdr.P_Memsz < Phdr.P_Filesz
+              or else (Phdr.P_Memsz > 0
+                       and then Phdr.P_Memsz - 1 >
+                                   Double_Word'Last - Phdr.P_Vaddr)
+            then
+               Close (File);
+               Result := Invalid_Format;
+               return;
+            end if;
+
             Info.Num_Segments := Info.Num_Segments + 1;
 
             if Verbose then
@@ -547,15 +620,17 @@ package body RISCV.ELF is
             if Phdr.P_Vaddr < Info.Load_Address then
                Info.Load_Address := Phdr.P_Vaddr;
             end if;
-            if Phdr.P_Vaddr + Phdr.P_Memsz > Info.End_Address then
-               Info.End_Address := Phdr.P_Vaddr + Phdr.P_Memsz;
+            if Phdr.P_Memsz > 0
+              and then Phdr.P_Vaddr + (Phdr.P_Memsz - 1) > Info.End_Address
+            then
+               Info.End_Address := Phdr.P_Vaddr + (Phdr.P_Memsz - 1);
             end if;
 
             if Phdr.P_Filesz > 0 then
                Set_Index (File, Positive_Count (Phdr.P_Offset + 1));
                for Offset in Double_Word range 0 .. Phdr.P_Filesz - 1 loop
                   Byte'Read (Stream, B);
-                  Memory.Write_Byte (Mem,
+                  Memory.Write_Byte_Raw (Mem,
                      Memory_Address (Phdr.P_Vaddr + Offset), B);
                end loop;
             end if;
@@ -563,7 +638,7 @@ package body RISCV.ELF is
             if Phdr.P_Memsz > Phdr.P_Filesz then
                for Offset in Double_Word range
                   Phdr.P_Filesz .. Phdr.P_Memsz - 1 loop
-                  Memory.Write_Byte (Mem,
+                  Memory.Write_Byte_Raw (Mem,
                      Memory_Address (Phdr.P_Vaddr + Offset), 0);
                end loop;
             end if;

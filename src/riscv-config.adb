@@ -204,7 +204,8 @@ package body RISCV.Config is
       --  Add memory regions
       for I in 1 .. Profile.Num_Regions loop
          declare
-            R : Memory_Region_Config renames Profile.Memory_Regions (I);
+            R      : Memory_Region_Config renames Profile.Memory_Regions (I);
+            Before : constant Natural := Mem.Region_Count;
          begin
             Memory.Add_Region (Mem,
                                Name  => Trim (R.Name),
@@ -212,6 +213,16 @@ package body RISCV.Config is
                                Size  => R.Size,
                                Rtype => R.Rtype,
                                Perm  => R.Perm);
+            --  Add_Region drops a region it cannot accept (bad size, no
+            --  room, wraps the address space, or overlaps one already
+            --  registered). Say so: a silently missing region shows up much
+            --  later as an unexplained access fault.
+            if Mem.Region_Count = Before then
+               Ada.Text_IO.Put_Line
+                 ("Warning: memory region '" & Trim (R.Name) &
+                  "' was rejected (bad size, overlapping, " &
+                  "or past the end of the address space)");
+            end if;
          end;
       end loop;
 
@@ -256,17 +267,21 @@ package body RISCV.Config is
    --  Get Profile by Name
    --  ========================================================================
 
-   function Get_Profile (Name : String) return Hardware_Profile is
-      Lower_Name : String := Name;
+   function To_Lower (S : String) return String is
+      Result : String := S;
    begin
-      --  Convert to lowercase for comparison
-      for I in Lower_Name'Range loop
-         if Lower_Name (I) in 'A' .. 'Z' then
-            Lower_Name (I) :=
-               Character'Val (Character'Pos (Lower_Name (I)) + 32);
+      for I in Result'Range loop
+         if Result (I) in 'A' .. 'Z' then
+            Result (I) :=
+               Character'Val (Character'Pos (Result (I)) + 32);
          end if;
       end loop;
+      return Result;
+   end To_Lower;
 
+   function Get_Profile (Name : String) return Hardware_Profile is
+      Lower_Name : constant String := To_Lower (Name);
+   begin
       if Lower_Name = "simple" then
          return Profile_Simple;
       elsif Lower_Name = "qemu-virt" or Lower_Name = "qemu_virt" then
@@ -276,6 +291,19 @@ package body RISCV.Config is
          return Profile_Simple;
       end if;
    end Get_Profile;
+
+   function Known_Profile (Name : String) return Boolean is
+      Lower_Name : constant String := To_Lower (Name);
+   begin
+      return Lower_Name = "simple"
+        or else Lower_Name = "qemu-virt"
+        or else Lower_Name = "qemu_virt";
+   end Known_Profile;
+
+   function Profile_Names return String is
+   begin
+      return "simple qemu-virt";
+   end Profile_Names;
 
    --  ========================================================================
    --  Load Profile from File
@@ -399,15 +427,24 @@ package body RISCV.Config is
                      declare
                         V : constant String := Trim (Value (1 .. Val_Len));
                      begin
+                        --  Permissions follow the region type. Without this
+                        --  the entry keeps the RWX default inherited from
+                        --  Profile_Simple and a "rom" region stays writable.
                         if V = "ram" then
                            Profile.Memory_Regions (Region_Idx).Rtype :=
                               Memory.RAM;
+                           Profile.Memory_Regions (Region_Idx).Perm :=
+                              Memory.Permission_RWX;
                         elsif V = "rom" then
                            Profile.Memory_Regions (Region_Idx).Rtype :=
                               Memory.ROM;
+                           Profile.Memory_Regions (Region_Idx).Perm :=
+                              Memory.Permission_RX;
                         elsif V = "flash" then
                            Profile.Memory_Regions (Region_Idx).Rtype :=
                               Memory.Flash;
+                           Profile.Memory_Regions (Region_Idx).Perm :=
+                              Memory.Permission_RX;
                         end if;
                      end;
                   end if;

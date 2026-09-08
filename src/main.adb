@@ -61,6 +61,7 @@ procedure Main is
    Debug         : Boolean := False;
    GDB_Mode      : Boolean := False;
    GDB_Port      : Natural := 1234;
+   GDB_All_Ifaces : Boolean := False;
    Profile_Mode  : Boolean := False;
    Flamegraph_File : String (1 .. 256) := (others => ' ');
    Flamegraph_Len  : Natural := 0;
@@ -88,6 +89,16 @@ procedure Main is
    Config_Len    : Natural := 0;
    Log_Dir_Buf   : String (1 .. 256) := (others => ' ');
    Log_Dir_Len   : Natural := 0;
+
+   --  Host file I/O policy (semihosting ECALLs 0x500, 0x505-0x50C)
+   Host_IO_Sel   : Memory.Host_IO_Mode := Memory.Read_Write;
+   Host_Root_Buf : String (1 .. Memory.Max_Host_Root) := (others => ' ');
+   Host_Root_Len : Natural := 0;
+
+   --  Raise load/store/instruction access faults on unmapped or
+   --  permission-denied accesses (default on; --no-access-faults restores
+   --  the older silent behaviour).
+   Access_Faults : Boolean := True;
    Dump_Sig      : Boolean := False;
    HTIF_Mode     : Boolean := False;
    Tohost_Override     : Memory_Address := 0;
@@ -140,7 +151,8 @@ procedure Main is
       Put_Line ("  --icache <kb>         Enable I-cache with given size in KB (4-way)");
       Put_Line ("  --dcache <kb>         Enable D-cache with given size in KB (4-way)");
       Put_Line ("  -d                   Start in interactive debugger");
-      Put_Line ("  --gdb [port]         Start GDB remote stub (default port: 1234)");
+      Put_Line ("  --gdb [port]         Start GDB remote stub on 127.0.0.1 (default port: 1234)");
+      Put_Line ("  --gdb-listen-all     Bind the GDB stub to all interfaces (unauthenticated)");
       Put_Line ("  --profile            Enable profiling (function call statistics)");
       Put_Line ("  --flamegraph [file]  Enable profiling and export flamegraph data");
       Put_Line ("  --coverage [file]    Track instruction coverage (default: coverage.txt)");
@@ -152,6 +164,9 @@ procedure Main is
       Put_Line ("  --wait            Wait for keypress before starting (requires --pty)");
       Put_Line ("  -q, --quiet       Suppress informational output");
       Put_Line ("  --log-dir <dir>   Write semihosting log files to <dir> (default: CWD)");
+      Put_Line ("  --no-access-faults  Do not trap unmapped/read-only accesses (legacy)");
+      Put_Line ("  --host-io <mode>  Guest access to host files: off, ro, rw (default: rw)");
+      Put_Line ("  --host-io-root <d>  Confine guest host-file paths to <d> (default: CWD)");
       Put_Line ("  --machine <name>  Use hardware profile (simple, qemu-virt)");
       Put_Line ("  --config <file>   Load hardware profile from file");
       Put_Line ("  --list-machines   List available hardware profiles");
@@ -223,7 +238,8 @@ begin
                Name : constant String := Argument (Arg_Index);
                Len  : constant Natural := Natural'Min (Name'Length, 256);
             begin
-               Trace_File (1 .. Len) := Name;
+               Trace_File (1 .. Len) :=
+                  Name (Name'First .. Name'First + Len - 1);
                Trace_File_Len := Len;
             end;
             Arg_Index := Arg_Index + 1;
@@ -312,6 +328,9 @@ begin
                   when others => null;  -- Not a valid port, keep default
                end;
             end if;
+         elsif Arg = "--gdb-listen-all" then
+            GDB_All_Ifaces := True;
+            Arg_Index := Arg_Index + 1;
          elsif Arg = "--profile" then
             Profile_Mode := True;
             Arg_Index := Arg_Index + 1;
@@ -440,7 +459,8 @@ begin
                Name : constant String := Argument (Arg_Index + 3);
                Len  : constant Natural := Natural'Min (Name'Length, 256);
             begin
-               Sig_File (1 .. Len) := Name;
+               Sig_File (1 .. Len) :=
+                  Name (Name'First .. Name'First + Len - 1);
                Sig_File_Len := Len;
             end;
             Arg_Index := Arg_Index + 4;
@@ -480,6 +500,47 @@ begin
                Log_Dir_Len := Len;
             end;
             Arg_Index := Arg_Index + 1;
+         elsif Arg = "--no-access-faults" then
+            Access_Faults := False;
+            Arg_Index := Arg_Index + 1;
+         elsif Arg = "--host-io" then
+            if Arg_Index + 1 > Argument_Count then
+               Put_Line ("Error: --host-io requires off, ro or rw");
+               return;
+            end if;
+            Arg_Index := Arg_Index + 1;
+            declare
+               V : constant String := Argument (Arg_Index);
+            begin
+               if V = "off" then
+                  Host_IO_Sel := Memory.Off;
+               elsif V = "ro" then
+                  Host_IO_Sel := Memory.Read_Only;
+               elsif V = "rw" then
+                  Host_IO_Sel := Memory.Read_Write;
+               else
+                  Put_Line ("Error: --host-io expects off, ro or rw (got '" &
+                     V & "')");
+                  return;
+               end if;
+            end;
+            Arg_Index := Arg_Index + 1;
+         elsif Arg = "--host-io-root" then
+            if Arg_Index + 1 > Argument_Count then
+               Put_Line ("Error: --host-io-root requires a directory");
+               return;
+            end if;
+            Arg_Index := Arg_Index + 1;
+            declare
+               Dir : constant String := Argument (Arg_Index);
+               Len : constant Natural :=
+                  Natural'Min (Dir'Length, Memory.Max_Host_Root);
+            begin
+               Host_Root_Buf (1 .. Len) :=
+                  Dir (Dir'First .. Dir'First + Len - 1);
+               Host_Root_Len := Len;
+            end;
+            Arg_Index := Arg_Index + 1;
          elsif Arg = "--machine" or Arg = "-m" then
             if Arg_Index + 1 > Argument_Count then
                Put_Line ("Error: --machine requires an argument");
@@ -490,7 +551,8 @@ begin
                Name : constant String := Argument (Arg_Index);
                Len  : constant Natural := Natural'Min (Name'Length, 64);
             begin
-               Machine_Name (1 .. Len) := Name;
+               Machine_Name (1 .. Len) :=
+                  Name (Name'First .. Name'First + Len - 1);
                Machine_Len := Len;
                Use_Profile := True;
             end;
@@ -505,7 +567,8 @@ begin
                Name : constant String := Argument (Arg_Index);
                Len  : constant Natural := Natural'Min (Name'Length, 256);
             begin
-               Config_File (1 .. Len) := Name;
+               Config_File (1 .. Len) :=
+                  Name (Name'First .. Name'First + Len - 1);
                Config_Len := Len;
                Use_Profile := True;
             end;
@@ -548,7 +611,16 @@ begin
          Put_Line ("Loaded profile from: " & Config_File (1 .. Config_Len));
       end if;
    elsif Machine_Len > 0 then
-      --  Use built-in profile
+      --  Use built-in profile. Reject unknown names rather than silently
+      --  falling back to "simple": the wrong memory map produces a confusing
+      --  ILLEGAL_INSTRUCTION far from the actual mistake.
+      if not Config.Known_Profile (Machine_Name (1 .. Machine_Len)) then
+         Put_Line ("Error: unknown machine profile '" &
+            Machine_Name (1 .. Machine_Len) & "'");
+         Put_Line ("  Built-in profiles: " & Config.Profile_Names);
+         Put_Line ("  To load a profile from a file, use --config <file>");
+         return;
+      end if;
       Profile := Config.Get_Profile (Machine_Name (1 .. Machine_Len));
       if Verbose then
          Put_Line ("Using profile: " &
@@ -581,6 +653,13 @@ begin
    end if;
 
    --  Apply log directory (must be set after Initialize/Apply_Profile)
+   Mem.Fault_Traps := Access_Faults;
+   Mem.Host_IO := Host_IO_Sel;
+   if Host_Root_Len > 0 then
+      Mem.Host_Root (1 .. Host_Root_Len) := Host_Root_Buf (1 .. Host_Root_Len);
+      Mem.Host_Root_Len := Host_Root_Len;
+   end if;
+
    if Log_Dir_Len > 0 then
       Mem.Log_Dir (1 .. Log_Dir_Len) := Log_Dir_Buf (1 .. Log_Dir_Len);
       Mem.Log_Dir_Len := Log_Dir_Len;
@@ -838,7 +917,7 @@ begin
          Should_Run : Boolean;
          Should_Step : Boolean;
       begin
-         GDB.Initialize (Server, GDB_Port);
+         GDB.Initialize (Server, GDB_Port, GDB_All_Ifaces);
 
          --  Track all memory accesses so watchpoints can fire
          Mem.Track_Access := True;

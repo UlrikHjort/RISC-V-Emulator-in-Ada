@@ -120,6 +120,10 @@ bin/riscv_emulator [flags] <program.bin|.elf> [load_address]
 --timeout <n>                Halt after N wall-clock seconds
 --harts <n>                  Number of harts to simulate (1 or 2, RV32 only)
 --log-dir <dir>              Write semihosting log files to <dir> (created if absent)
+--host-io <mode>             Guest access to host files: off, ro, rw (default: rw)
+--host-io-root <dir>         Confine guest host-file paths to <dir> (default: CWD)
+--no-access-faults           Complete unmapped/read-only accesses silently (legacy)
+--gdb-listen-all             Bind the GDB stub to all interfaces (unauthenticated)
 --rv32e                      Enable RV32E mode (16-register subset, rewrites MISA)
 --rv64e                      Enable RV64E mode (16-register subset for RV64)
 --cache                      Enable L1 I+D cache simulation (4-way each, miss=20cy)
@@ -558,12 +562,49 @@ effort with low practical payoff:
 
 ---
 
+## Memory Access Semantics
+
+An access to an address that no region or peripheral covers raises a fault
+rather than reading zero or dropping the write:
+
+| Access | Cause | mcause |
+|---|---|---|
+| Fetch from unmapped memory | instruction access fault | 1 |
+| Load from unmapped or unreadable memory | load access fault | 5 |
+| Store to unmapped memory, or to a `rom`/`flash` region | store access fault | 7 |
+
+`mtval` holds the address of the **first** failing byte, so a word straddling
+the end of a region reports the boundary rather than the access base. A
+straddling access faults outright instead of returning a mix of real and zero
+bytes.
+
+Instruction fetch reads the low half-word first and only reads the upper half
+for a 32-bit instruction, so a compressed instruction in the last half-word of
+a region does not fault on the two bytes past its end.
+
+Misaligned data accesses are still emulated, not trapped (only AMOs require
+natural alignment). `--no-access-faults` restores the older behaviour, in
+which every bad access completed silently.
+
+## Host File I/O Policy
+
+Guest programs reach the host filesystem through ECALLs `0x500` and
+`0x505`-`0x50C`, naming the path themselves. Paths are resolved under a root
+directory (`--host-io-root`, default: the working directory) and are rejected
+if they are absolute, contain a `..` component, or contain a NUL.
+`--host-io off|ro|rw` sets what is permitted at all; `off` covers the log
+ECALL too. The check is on the name the guest supplies, not on where it
+resolves to, so a symlink inside the root cannot be used to point back out.
+
 ## Known Gotchas
 
 ### Emulator (Ada)
 - Every `Is_X_Address()` **must** check `Dev.Enabled` first -- uninitialized peripherals have Base_Address=0 and will intercept address-0 accesses otherwise.
 - Anonymous access allocators trigger `-gnatwae` error. Use named access types.
 - `Profiler_State` cycle fields use `Long_Long_Integer` -- never `Natural` (overflows at ~2.1B).
+- Program loaders must use `Memory.Write_Byte_Raw`, not `Write_Byte`: a guest store to a `rom` region now faults, and an image legitimately populates one.
+- `Memory.Last_Result` survives only until the next byte access. Code that needs the outcome of a whole load or store reads `Pending_Fault` between `Clear_Access_Fault` calls, which latches the *first* failure.
+- `--machine` accepts built-in profile names only (`simple`, `qemu-virt`); profile files go to `--config`.
 
 ### C Programs
 - Large `= {0}` struct initialisers -> GCC emits `memset()` -> must link `string.c`.

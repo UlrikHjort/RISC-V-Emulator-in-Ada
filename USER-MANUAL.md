@@ -243,8 +243,11 @@ vlen = 128
 | Type | Description |
 |---|---|
 | `ram` | Read/write volatile memory |
-| `rom` | Read-only (writes silently ignored) |
-| `flash` | Read-only (for future programmability) |
+| `rom` | Read-only; a guest store raises a store access fault (mcause 7) |
+| `flash` | Read-only, same as `rom` (for future programmability) |
+
+Permissions follow the `type` key. The program loader writes through the
+permission check, so an image may still populate a `rom` region.
 
 #### Peripheral Types
 
@@ -283,13 +286,37 @@ Usage: riscv_emulator [options] <file> [start_address]
 | `--max-instructions <n>` | Stop after n instructions |
 | `-q`, `--quiet` | Suppress informational output |
 | `-v` | Verbose output (show ELF loading details) |
+| `--no-access-faults` | Complete unmapped and read-only accesses silently (pre-1.1 behaviour) |
+
+`--machine` takes a **built-in profile name** only; an unrecognised name is an
+error. To load a profile from a file, use `--config <file>`.
+
+### Host File I/O Options
+
+Guest programs can open host files through the semihosting ECALLs
+(`0x500`, `0x505`-`0x50C`). Paths come from the guest, so they are resolved
+under a root directory and may not be absolute or contain `..`.
+
+| Option | Description |
+|---|---|
+| `--host-io <mode>` | `off` (no host file access at all), `ro` (open existing files for reading), `rw` (default: also create and write) |
+| `--host-io-root <dir>` | Directory guest paths are resolved under (default: the working directory) |
+
+`--host-io off` also disables the semihosting log ECALL, since that creates a
+host file too. Running an untrusted binary is the case to tighten:
+
+```bash
+./bin/riscv_emulator --machine qemu-virt --host-io off untrusted.elf
+./bin/riscv_emulator --machine qemu-virt --host-io-root /tmp/sandbox prog.elf
+```
 
 ### Debug & Trace Options
 
 | Option | Description |
 |---|---|
 | `-d` | Start interactive debugger |
-| `--gdb [port]` | Start GDB remote stub (default: 1234) |
+| `--gdb [port]` | Start GDB remote stub on `127.0.0.1` (default port: 1234) |
+| `--gdb-listen-all` | Bind the GDB stub to every interface. The RSP protocol is unauthenticated and gives full control of guest memory and registers, so this exposes the session to anyone who can reach the port |
 | `-t` | Enable instruction trace to stdout |
 | `--trace-file <file>` | Redirect trace to a file |
 | `--trace-range <start> <end>` | Trace only when PC is in range |

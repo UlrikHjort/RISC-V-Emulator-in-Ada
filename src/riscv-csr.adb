@@ -350,6 +350,7 @@ package body RISCV.CSR is
          when Misaligned_Fetch   => return CAUSE_INSN_MISALIGNED;
          when Misaligned_Load    => return CAUSE_LOAD_MISALIGNED;
          when Misaligned_Store   => return CAUSE_STORE_MISALIGNED;
+         when Insn_Access_Fault  => return CAUSE_INSN_ACCESS_FAULT;
          when Load_Access_Fault  => return CAUSE_LOAD_ACCESS_FAULT;
          when Store_Access_Fault => return CAUSE_STORE_ACCESS_FAULT;
          when Environment_Call   => return CAUSE_ECALL_U;

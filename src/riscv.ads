@@ -528,6 +528,7 @@ package RISCV is
       Misaligned_Fetch,
       Misaligned_Load,
       Misaligned_Store,
+      Insn_Access_Fault,
       Load_Access_Fault,
       Store_Access_Fault,
       Environment_Call,

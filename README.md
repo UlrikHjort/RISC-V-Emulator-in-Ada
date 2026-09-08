@@ -18,7 +18,14 @@ a cycle-stall timing model.
 
 A semihosting host file-I/O interface (ECALLs `0x505`-`0x50C`) lets guest
 programs read and write real files, which is complete enough to run a
-bare-metal **DOOM** port (doomgeneric).
+bare-metal **DOOM** port (doomgeneric). Guest paths are confined to a root
+directory (`--host-io-root`, default: the working directory) and the whole
+interface can be turned down to read-only or off with `--host-io`.
+
+Accesses outside every mapped region raise proper access faults - an unmapped
+load, a store into a `rom` region and a word straddling a region boundary all
+trap rather than silently returning zero or being dropped, which is what makes
+the emulator useful for finding wild pointers and stack overflows.
 
 ## Documentation
 
@@ -543,3 +550,17 @@ MIT-licensed emulator and the GPLv2 DOOM engine described above.
 
 The design decisions, the architecture, and the direction of the project remain
 my own.
+
+## Trademarks
+
+RISC-V is a registered trademark of RISC-V International. This project is an
+independent implementation of the RISC-V instruction set architecture and is not
+affiliated with, sponsored by, or endorsed by RISC-V International. The name is
+used here only to identify the architecture the emulator implements.
+
+DOOM is a trademark of id Software LLC, a ZeniMax Media company. The vendored
+doomgeneric port under `programs/doom/` is used under the GPLv2 as described
+above; this project is not affiliated with or endorsed by id Software or
+ZeniMax Media.
+
+All other trademarks are the property of their respective owners.

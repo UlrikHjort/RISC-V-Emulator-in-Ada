@@ -40,9 +40,14 @@ package RISCV.GDB is
    --  GDB server state
    type GDB_Server is limited private;
 
-   --  Initialize GDB server on the given TCP port (default 1234)
-   procedure Initialize (Server : out GDB_Server;
-                        Port   : Natural := 1234);
+   --  Initialize GDB server on the given TCP port (default 1234).
+   --  Binds to the loopback interface unless Listen_All is set: the RSP
+   --  protocol has no authentication and gives complete control over guest
+   --  memory and registers, so it must not be reachable off the machine by
+   --  default.
+   procedure Initialize (Server     : out GDB_Server;
+                        Port       : Natural := 1234;
+                        Listen_All : Boolean := False);
 
    --  Block until GDB connects.  Returns True on success.
    function Accept_Connection (Server : in out GDB_Server) return Boolean;

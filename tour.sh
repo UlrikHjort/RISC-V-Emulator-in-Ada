@@ -367,7 +367,8 @@ echo -e "  ${C_YELLOW}    programs/out/bin/sha256-test.bin 80000000${C_RESET}"
 echo -e "  ${C_YELLOW}flamegraph.pl /tmp/fg.txt > /tmp/fg.svg && xdg-open /tmp/fg.svg${C_RESET}"
 echo
 echo -e "${C_WHITE}${C_BOLD}  Custom hardware profile${C_RESET}"
-echo -e "  ${C_YELLOW}bin/riscv_emulator --machine my-board.ini myprogram.bin 0x0${C_RESET}"
+echo -e "  ${C_YELLOW}bin/riscv_emulator --config my-board.cfg myprogram.bin 0x0${C_RESET}"
+echo -e "${C_DIM}  (--machine takes a built-in name; --config takes a profile file)${C_RESET}"
 echo
 echo -e "${C_WHITE}${C_BOLD}  Write your own test${C_RESET}"
 echo -e "  See ${C_YELLOW}TUTORIAL.md § 14${C_RESET} for the C skeleton and Makefile pattern."

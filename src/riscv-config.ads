@@ -110,6 +110,14 @@ package RISCV.Config is
    --  Get profile by name (returns Profile_Simple if not found)
    function Get_Profile (Name : String) return Hardware_Profile;
 
+   --  True if Name matches a built-in profile. Callers should check this
+   --  before Get_Profile: an unrecognised name silently yields Profile_Simple,
+   --  which is almost never the memory map the user meant.
+   function Known_Profile (Name : String) return Boolean;
+
+   --  Space-separated list of the built-in profile names, for error messages.
+   function Profile_Names return String;
+
    --  Load profile from file
    procedure Load_Profile (Filename : String;
                            Profile  : out Hardware_Profile;

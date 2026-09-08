@@ -70,6 +70,31 @@ procedure Test_Traps is
              Shift_Left (Imm_Bits, 20);
    end Encode_ADDI;
 
+   --  LW rd, imm(rs1)
+   function Encode_LW (Rd, Rs1 : Register_Index;
+                       Imm : Signed_Word) return Word is
+      Imm_Bits : constant Word := Word (Imm) and 16#FFF#;
+   begin
+      return OPCODE_LOAD or
+             Shift_Left (Word (Rd), 7) or
+             Shift_Left (FUNCT3_LW, 12) or
+             Shift_Left (Word (Rs1), 15) or
+             Shift_Left (Imm_Bits, 20);
+   end Encode_LW;
+
+   --  SW rs2, imm(rs1)
+   function Encode_SW (Rs1, Rs2 : Register_Index;
+                       Imm : Signed_Word) return Word is
+      Imm_Bits : constant Word := Word (Imm) and 16#FFF#;
+   begin
+      return OPCODE_STORE or
+             Shift_Left (Imm_Bits and 16#1F#, 7) or
+             Shift_Left (FUNCT3_SW, 12) or
+             Shift_Left (Word (Rs1), 15) or
+             Shift_Left (Word (Rs2), 20) or
+             Shift_Left (Shift_Right (Imm_Bits, 5), 25);
+   end Encode_SW;
+
    --  CSR instruction
    function Encode_CSR (Csr_Addr : CSR.CSR_Address;
                         Rs1_Or_Zimm : Register_Index;
@@ -644,6 +669,190 @@ procedure Test_Traps is
              "CLINT: mcause = software interrupt");
    end Test_Clint_Software_Interrupt;
 
+   --  ======================================================================
+   --  Access faults: an access outside every region must trap, not be
+   --  silently completed with a zero result or a dropped write.
+   --  ======================================================================
+   procedure Test_Load_Access_Fault is
+      C : CPU.CPU_State;
+      M : Memory.Memory_Unit;
+   begin
+      Put_Line ("Testing load access fault...");
+
+      CPU.Initialize (C, 16#1000#);
+      Memory.Initialize (M);
+      Memory.Add_Region (M, "RAM", 0, 16#10000#);
+      CSR.Write (C.CSRs, CSR.CSR_MTVEC, 16#2000#);
+
+      --  x1 = 0 by default, so LW x2, 0x400(x1) reads 0x400 (mapped) and
+      --  LW x2, -1(x1) would straddle; use an address past the region.
+      C.Registers (1) := 16#0002_0000#;   --  outside the 64 KB region
+      Memory.Write_Word (M, 16#1000#, Encode_LW (2, 1, 0));
+
+      CPU.Step (C, M, False, CPU.Trace_Config'(Enabled => False, others => <>));
+
+      Check (CSR.Read (C.CSRs, CSR.CSR_MCAUSE) = CSR.CAUSE_LOAD_ACCESS_FAULT,
+             "LW from unmapped address: mcause = 5 (load access fault)");
+      Check (CSR.Read (C.CSRs, CSR.CSR_MTVAL) = 16#0002_0000#,
+             "LW from unmapped address: mtval = faulting address");
+      Check (C.Registers (2) = 0,
+             "LW from unmapped address: rd left unwritten");
+      Check (C.PC = 16#2000#,
+             "LW from unmapped address: PC jumps to mtvec");
+   end Test_Load_Access_Fault;
+
+   procedure Test_Store_Access_Fault is
+      C : CPU.CPU_State;
+      M : Memory.Memory_Unit;
+   begin
+      Put_Line ("Testing store access fault...");
+
+      CPU.Initialize (C, 16#1000#);
+      Memory.Initialize (M);
+      Memory.Add_Region (M, "RAM", 0, 16#10000#);
+      CSR.Write (C.CSRs, CSR.CSR_MTVEC, 16#2000#);
+
+      C.Registers (1) := 16#0002_0000#;
+      C.Registers (3) := 16#DEAD_BEEF#;
+      Memory.Write_Word (M, 16#1000#, Encode_SW (1, 3, 0));
+
+      CPU.Step (C, M, False, CPU.Trace_Config'(Enabled => False, others => <>));
+
+      Check (CSR.Read (C.CSRs, CSR.CSR_MCAUSE) = CSR.CAUSE_STORE_ACCESS_FAULT,
+             "SW to unmapped address: mcause = 7 (store access fault)");
+      Check (C.PC = 16#2000#,
+             "SW to unmapped address: PC jumps to mtvec");
+   end Test_Store_Access_Fault;
+
+   procedure Test_ROM_Write_Faults is
+      C : CPU.CPU_State;
+      M : Memory.Memory_Unit;
+   begin
+      Put_Line ("Testing store to a read-only region...");
+
+      CPU.Initialize (C, 16#1000#);
+      Memory.Initialize (M);
+      Memory.Add_Region (M, "RAM", 0, 16#10000#);
+      Memory.Add_Region (M, "ROM", 16#0002_0000#, 16#1000#,
+                         Memory.ROM, Memory.Permission_RX);
+      CSR.Write (C.CSRs, CSR.CSR_MTVEC, 16#2000#);
+
+      C.Registers (1) := 16#0002_0000#;
+      C.Registers (3) := 16#A5A5_A5A5#;
+      Memory.Write_Word (M, 16#1000#, Encode_SW (1, 3, 0));
+
+      CPU.Step (C, M, False, CPU.Trace_Config'(Enabled => False, others => <>));
+
+      Check (CSR.Read (C.CSRs, CSR.CSR_MCAUSE) = CSR.CAUSE_STORE_ACCESS_FAULT,
+             "SW to ROM: mcause = 7 (store access fault)");
+      Check (Memory.Read_Word (M, 16#0002_0000#) = 0,
+             "SW to ROM: memory unchanged");
+   end Test_ROM_Write_Faults;
+
+   procedure Test_Straddling_Word_Faults is
+      C : CPU.CPU_State;
+      M : Memory.Memory_Unit;
+   begin
+      Put_Line ("Testing a word that straddles the end of a region...");
+
+      CPU.Initialize (C, 16#1000#);
+      Memory.Initialize (M);
+      Memory.Add_Region (M, "RAM", 0, 16#10000#);
+      CSR.Write (C.CSRs, CSR.CSR_MTVEC, 16#2000#);
+
+      --  Last two bytes of the region plus two bytes past its end. This used
+      --  to return a mix of real and zero bytes with no indication.
+      C.Registers (1) := 16#0000_FFFE#;
+      Memory.Write_Word (M, 16#1000#, Encode_LW (2, 1, 0));
+
+      CPU.Step (C, M, False, CPU.Trace_Config'(Enabled => False, others => <>));
+
+      Check (CSR.Read (C.CSRs, CSR.CSR_MCAUSE) = CSR.CAUSE_LOAD_ACCESS_FAULT,
+             "LW straddling the region end: mcause = 5");
+      Check (CSR.Read (C.CSRs, CSR.CSR_MTVAL) = 16#0001_0000#,
+             "LW straddling the region end: mtval = first bad byte");
+   end Test_Straddling_Word_Faults;
+
+   procedure Test_Access_Faults_Disabled is
+      C : CPU.CPU_State;
+      M : Memory.Memory_Unit;
+   begin
+      Put_Line ("Testing --no-access-faults behaviour...");
+
+      CPU.Initialize (C, 16#1000#);
+      Memory.Initialize (M);
+      Memory.Add_Region (M, "RAM", 0, 16#10000#);
+      M.Fault_Traps := False;
+      CSR.Write (C.CSRs, CSR.CSR_MTVEC, 16#2000#);
+
+      C.Registers (1) := 16#0002_0000#;
+      Memory.Write_Word (M, 16#1000#, Encode_LW (2, 1, 0));
+
+      CPU.Step (C, M, False, CPU.Trace_Config'(Enabled => False, others => <>));
+
+      Check (C.PC = 16#1004#,
+             "Fault_Traps off: unmapped load completes, PC advances");
+      Check (C.Registers (2) = 0,
+             "Fault_Traps off: unmapped load reads zero");
+   end Test_Access_Faults_Disabled;
+
+   --  ======================================================================
+   --  Region bookkeeping
+   --  ======================================================================
+   procedure Test_Region_Bookkeeping is
+      M : Memory.Memory_Unit;
+   begin
+      Put_Line ("Testing region registration...");
+
+      Memory.Initialize_Empty (M);
+      Memory.Add_Region (M, "RAM", 16#8000_0000#, 16#1000#);
+      Check (M.Region_Count = 1, "Add_Region: first region accepted");
+
+      --  Overlapping the existing region must be rejected, not silently
+      --  shadowed by whichever comes first in the scan.
+      Memory.Add_Region (M, "OVL", 16#8000_0800#, 16#1000#);
+      Check (M.Region_Count = 1, "Add_Region: overlapping region rejected");
+
+      Memory.Add_Region (M, "NEXT", 16#8000_1000#, 16#1000#);
+      Check (M.Region_Count = 2, "Add_Region: abutting region accepted");
+
+      --  A region running off the top of the address space has no meaning.
+      Memory.Add_Region (M, "WRAP", 16#FFFF_F000#, 16#2000#);
+      Check (M.Region_Count = 2, "Add_Region: wrapping region rejected");
+
+      --  ... but one ending exactly at 2**32 is fine and must be reachable.
+      Memory.Add_Region (M, "TOP", 16#FFFF_F000#, 16#1000#);
+      Check (M.Region_Count = 3, "Add_Region: region ending at 2**32 accepted");
+      Memory.Write_Word (M, 16#FFFF_FFFC#, 16#1234_5678#);
+      Check (Memory.Read_Word (M, 16#FFFF_FFFC#) = 16#1234_5678#,
+             "Find_Region: last word of the address space is reachable");
+   end Test_Region_Bookkeeping;
+
+   --  ======================================================================
+   --  Host path confinement
+   --  ======================================================================
+   procedure Test_Host_Path_Confinement is
+   begin
+      Put_Line ("Testing host path confinement...");
+
+      Check (Memory.Valid_Host_Name ("frame.ppm"),
+             "Host path: plain name accepted");
+      Check (Memory.Valid_Host_Name ("sub/dir/frame.ppm"),
+             "Host path: relative subdirectory accepted");
+      Check (not Memory.Valid_Host_Name ("/etc/passwd"),
+             "Host path: absolute path refused");
+      Check (not Memory.Valid_Host_Name ("../escape"),
+             "Host path: leading .. refused");
+      Check (not Memory.Valid_Host_Name ("a/../../escape"),
+             "Host path: embedded .. refused");
+      Check (not Memory.Valid_Host_Name ("dir/.."),
+             "Host path: trailing .. refused");
+      Check (Memory.Valid_Host_Name ("..hidden"),
+             "Host path: name merely starting with dots accepted");
+      Check (not Memory.Valid_Host_Name (""),
+             "Host path: empty name refused");
+   end Test_Host_Path_Confinement;
+
 begin
    Put_Line ("=================================================");
    Put_Line ("       RISCV Emulator Trap/Interrupt Tests");
@@ -681,6 +890,20 @@ begin
    Test_Clint_Timer_Interrupt;
    New_Line;
    Test_Clint_Software_Interrupt;
+   New_Line;
+   Test_Load_Access_Fault;
+   New_Line;
+   Test_Store_Access_Fault;
+   New_Line;
+   Test_ROM_Write_Faults;
+   New_Line;
+   Test_Straddling_Word_Faults;
+   New_Line;
+   Test_Access_Faults_Disabled;
+   New_Line;
+   Test_Region_Bookkeeping;
+   New_Line;
+   Test_Host_Path_Confinement;
 
    New_Line;
    Put_Line ("=================================================");

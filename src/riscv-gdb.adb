@@ -127,8 +127,9 @@ package body RISCV.GDB is
    -- Initialize --
    ----------------
 
-   procedure Initialize (Server : out GDB_Server;
-                        Port   : Natural := 1234) is
+   procedure Initialize (Server     : out GDB_Server;
+                        Port       : Natural := 1234;
+                        Listen_All : Boolean := False) is
    begin
       Server.Port := Port;
       Server.Connected := False;
@@ -140,12 +141,21 @@ package body RISCV.GDB is
                         Socket_Level,
                         (Reuse_Address, True));
 
-      Server.Address.Addr := Any_Inet_Addr;
+      --  Loopback by default: RSP is unauthenticated and exposes the guest's
+      --  whole address space to whoever connects.
+      Server.Address.Addr :=
+         (if Listen_All then Any_Inet_Addr else Loopback_Inet_Addr);
       Server.Address.Port := Port_Type (Port);
       Bind_Socket (Server.Listening_Socket, Server.Address);
       Listen_Socket (Server.Listening_Socket);
 
-      Put_Line ("GDB server listening on port" & Natural'Image (Port));
+      if Listen_All then
+         Put_Line ("GDB server listening on ALL interfaces, port" &
+            Natural'Image (Port) & " (unauthenticated)");
+      else
+         Put_Line ("GDB server listening on 127.0.0.1 port" &
+            Natural'Image (Port));
+      end if;
    end Initialize;
 
    -----------------------

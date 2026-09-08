@@ -111,6 +111,20 @@ package RISCV.Memory is
    --  Semihosting File I/O (ECALLs 0x505-0x50C)
    --  ========================================================================
 
+   --  ========================================================================
+   --  Host file I/O policy (semihosting ECALLs 0x500, 0x505-0x50C)
+   --  ========================================================================
+
+   --  What the guest is allowed to do to the host filesystem.
+   --    Off        - every host file ECALL fails
+   --    Read_Only  - the guest may open existing files for reading
+   --    Read_Write - the guest may also create, append to and write files
+   type Host_IO_Mode is (Off, Read_Only, Read_Write);
+
+   --  Longest host path the guest may name, and the longest root prefix.
+   Max_Host_Path : constant := 512;
+   Max_Host_Root : constant := 256;
+
    Max_SH_Files : constant := 16;
    type SH_File_Index is range 0 .. Max_SH_Files - 1;
    type SH_File_Type_Acc  is access Ada.Streams.Stream_IO.File_Type;
@@ -159,6 +173,35 @@ package RISCV.Memory is
       --  Access status (set after each operation)
       Last_Result  : Access_Result := OK;
 
+      --  Sticky record of the first failing byte access since the last
+      --  Clear_Access_Fault. Last_Result only survives until the next
+      --  Read_Byte, so a word access composed of four byte accesses loses a
+      --  fault on the first byte; the CPU needs the first failure, not the
+      --  last, and a vector load may touch hundreds of bytes.
+      Fault_Result  : Access_Result := OK;
+      Fault_Address : Memory_Address := 0;
+
+      --  When False, Pending_Fault always reports OK and the CPU keeps the
+      --  pre-existing behaviour of completing bad accesses silently
+      --  (--no-access-faults).
+      Fault_Traps   : Boolean := True;
+
+      --  Bounding span of every enabled peripheral, maintained by
+      --  Note_Peripheral. Read_Byte and Write_Byte walk ten sequential
+      --  range tests to find a peripheral; the overwhelming majority of
+      --  accesses are RAM, and RAM sits wholly above or wholly below the
+      --  MMIO block in every profile, so two comparisons skip all ten.
+      --  The span is deliberately padded, so it can only ever be too wide,
+      --  which costs a slow path and never correctness.
+      Periph_Count : Natural := 0;
+      Periph_Min   : Memory_Address := Memory_Address'Last;
+      Periph_Max   : Memory_Address := 0;
+
+      --  Index of the region matched by the previous lookup. Instruction
+      --  fetch and data access are both highly local, so this hits nearly
+      --  always and turns the linear scan into one comparison.
+      Region_Hint  : Natural := 0;
+
       --  Watchpoint callback (for debugger)
       Access_Hook  : Memory_Access_Callback := null;
 
@@ -172,6 +215,14 @@ package RISCV.Memory is
       --  Semihosting file I/O (ECALLs 0x505-0x50C)
       SH_Files     : SH_File_Array      := (others => null);
       SH_File_Open : SH_File_Open_Array := (others => False);
+
+      --  Host file I/O policy. The guest names paths itself, so without a
+      --  root to resolve them against, any program the emulator runs gets
+      --  the emulator's own filesystem rights. Paths are confined to
+      --  Host_IO_Root (default: the working directory).
+      Host_IO      : Host_IO_Mode := Read_Write;
+      Host_Root    : String (1 .. Max_Host_Root) := (others => ' ');
+      Host_Root_Len : Natural := 0;
 
       --  HTIF tohost termination (riscv-tests), enabled by --htif.
       --  When a store hits Tohost_Addr, the written value is latched and
@@ -259,6 +310,61 @@ package RISCV.Memory is
 
    --  Check last operation result
    function Last_Access_Result (Mem : Memory_Unit) return Access_Result;
+
+   --  ========================================================================
+   --  Access faults
+   --  ========================================================================
+
+   --  Forget any recorded fault. The CPU calls this before performing an
+   --  instruction's data access.
+   procedure Clear_Access_Fault (Mem : in out Memory_Unit);
+
+   --  The first fault since Clear_Access_Fault, or OK if there was none.
+   function Pending_Fault (Mem : Memory_Unit) return Access_Result;
+
+   --  Address of the byte that produced Pending_Fault. Meaningless when
+   --  Pending_Fault is OK.
+   function Pending_Fault_Address (Mem : Memory_Unit) return Memory_Address;
+
+   --  Fetch an instruction's two half-words in one region lookup. Lo is
+   --  always read. Both is True when Hi was read as part of the same
+   --  contiguous block, which is the common case and lets the CPU decode a
+   --  32-bit instruction without a second lookup; when it is False the CPU
+   --  must read the upper half itself (and may not need to at all, if the
+   --  low half turns out to be a compressed instruction).
+   procedure Read_Insn_Halves (Mem     : in out Memory_Unit;
+                               Address : Memory_Address;
+                               Lo      : out Half_Word;
+                               Hi      : out Half_Word;
+                               Both    : out Boolean);
+
+   --  Write ignoring region permissions, for populating memory before the
+   --  guest runs. Program loaders use this so that a ROM or flash region can
+   --  be filled from the image; guest stores must not.
+   procedure Write_Byte_Raw (Mem     : in out Memory_Unit;
+                             Address : Memory_Address;
+                             Value   : Byte);
+
+   --  ========================================================================
+   --  Host path confinement
+   --  ========================================================================
+
+   --  True if a guest-supplied path is safe to use as a relative name:
+   --  non-empty, not absolute, no NUL, and no ".." component. Rejecting
+   --  ".." by name (rather than resolving it) also stops a symlink inside
+   --  the root from pointing back out of it.
+   function Valid_Host_Name (Path : String) return Boolean;
+
+   --  Map a guest-supplied path onto the host filesystem under Host_Root.
+   --  Allowed is False when the policy forbids the access or the path tries
+   --  to leave the root; in that case Full/Full_Len are meaningless and the
+   --  caller must fail the ECALL. Writing selects the permission required.
+   procedure Resolve_Host_Path (Mem      : Memory_Unit;
+                                Path     : String;
+                                Writing  : Boolean;
+                                Full     : out String;
+                                Full_Len : out Natural;
+                                Allowed  : out Boolean);
 
    --  ========================================================================
    --  UART Control
