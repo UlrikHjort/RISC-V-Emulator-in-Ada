@@ -37,7 +37,11 @@ package body RISCV.CSR64 is
       State.Minstret := 0;
       State.Mcountinhibit := 0;
 
-      --  MISA: RV64IMAFDCV + S/U; MXL=2 (64-bit)
+      --  MISA: RV64IMAFDC + S/U; MXL=2 (64-bit).
+      --  V is deliberately NOT advertised: the RV64 core has no vector
+      --  decode (a vector instruction traps illegal), so claiming V would
+      --  make software enable a path that cannot run. The shared vector
+      --  engine is also only SEW=32-correct today; see STATUS.md.
       Write (State, CSR_MISA,
              Shift_Left (Double_Word (1),  0) or   --  A
              Shift_Left (Double_Word (1),  2) or   --  C
@@ -47,7 +51,6 @@ package body RISCV.CSR64 is
              Shift_Left (Double_Word (1), 12) or   --  M
              Shift_Left (Double_Word (1), 18) or   --  S
              Shift_Left (Double_Word (1), 20) or   --  U
-             Shift_Left (Double_Word (1), 21) or   --  V
              Shift_Left (Double_Word (2), 62));     --  MXL=2 (64-bit)
 
       --  MSTATUS: UXL=SXL=10 (XLEN=64), interrupts disabled

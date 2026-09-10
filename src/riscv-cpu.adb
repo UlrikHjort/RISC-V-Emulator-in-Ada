@@ -410,6 +410,7 @@ package body RISCV.CPU is
             declare
                Imm   : constant Word := To_Word (Decoded.Imm_I);
                Shamt : constant Natural := Natural (Imm and 16#1F#);
+               Bad   : Boolean := False;
             begin
                case Decoded.Funct3 is
                   when FUNCT3_ADD_SUB =>
@@ -425,101 +426,100 @@ package body RISCV.CPU is
                   when FUNCT3_AND =>
                      Result := Op_And (Rs1_Val, Imm);
                   when FUNCT3_SLL =>
-                     if (Instruction and 16#0200_0000#) /= 0 then
-                        --  RV32: instruction bit 25 set => shamt >= 32, illegal
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
-                        return;
-                     end if;
-                     if Decoded.Funct7 = FUNCT7_ROL then
-                        --  Zbb unary ops (funct7=0110000, rs2 selects op)
-                        case Word (Decoded.Rs2) is
-                           when ZBB_CLZ_RS2   => Result := Crypto.CLZ    (Rs1_Val);
-                           when ZBB_CTZ_RS2   => Result := Crypto.CTZ    (Rs1_Val);
-                           when ZBB_CPOP_RS2  => Result := Crypto.CPOP   (Rs1_Val);
-                           when ZBB_SEXTB_RS2 => Result := Crypto.SEXT_B (Rs1_Val);
-                           when ZBB_SEXTH_RS2 => Result := Crypto.SEXT_H (Rs1_Val);
-                           when others =>
-                              --  Not a Zbb unary op - fall through to SLLI
-                              Result := Shift_Left_Logical (Rs1_Val, Shamt);
-                        end case;
-                     elsif Decoded.Funct7 = FUNCT7_BSET then
-                        --  bseti rd, rs1, imm
-                        Result := Crypto.BSET (Rs1_Val, Word (Shamt));
-                     elsif Decoded.Funct7 = FUNCT7_BCLR then
-                        --  bclri rd, rs1, imm
-                        Result := Crypto.BCLR (Rs1_Val, Word (Shamt));
-                     elsif Decoded.Funct7 = FUNCT7_BINV then
-                        --  binvi rd, rs1, imm  (funct7=0110100 != funct7=0110000=ROL)
-                        Result := Crypto.BINV (Rs1_Val, Word (Shamt));
-                     elsif Decoded.Funct7 = FUNCT7_ZIP and Shamt = 15 then
-                        --  zip rd, rs1 (funct7=0000100, shamt=15)
-                        Result := Crypto.ZIP (Rs1_Val);
-                     elsif Decoded.Funct7 = FUNCT7_SHA256SIG0 then
-                        --  SHA-256/SM3 unary ops (funct7=0001000, funct3=001)
-                        case Word (Decoded.Rs2) is
-                           when SHA256_SUM0_RS2 =>
-                              Result := Crypto.SHA256SUM0 (Rs1_Val);
-                           when SHA256_SUM1_RS2 =>
-                              Result := Crypto.SHA256SUM1 (Rs1_Val);
-                           when SHA256_SIG0_RS2 =>
-                              Result := Crypto.SHA256SIG0 (Rs1_Val);
-                           when SHA256_SIG1_RS2 =>
-                              Result := Crypto.SHA256SIG1 (Rs1_Val);
-                           when SM3P0_RS2 =>
-                              Result := Crypto.SM3P0 (Rs1_Val);
-                           when SM3P1_RS2 =>
-                              Result := Crypto.SM3P1 (Rs1_Val);
-                           when others =>
-                              CPU.Exception_Code := Illegal_Instruction;
-                              Trap_Entry
-                                (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
-                              return;
-                        end case;
-                     else
-                        Result := Shift_Left_Logical (Rs1_Val, Shamt);
-                     end if;
+                     --  Exact funct7 match. Anything not listed is reserved
+                     --  and traps instead of running as SLLI -- including
+                     --  instruction bit 25 set (shamt >= 32), which leaves
+                     --  funct7 odd.
+                     case Decoded.Funct7 is
+                        when 2#0000000# =>
+                           Result := Shift_Left_Logical (Rs1_Val, Shamt);
+                        when 2#0110000# =>
+                           --  Zbb unary ops, rs2 selects the operation
+                           case Word (Decoded.Rs2) is
+                              when ZBB_CLZ_RS2   => Result := Crypto.CLZ    (Rs1_Val);
+                              when ZBB_CTZ_RS2   => Result := Crypto.CTZ    (Rs1_Val);
+                              when ZBB_CPOP_RS2  => Result := Crypto.CPOP   (Rs1_Val);
+                              when ZBB_SEXTB_RS2 => Result := Crypto.SEXT_B (Rs1_Val);
+                              when ZBB_SEXTH_RS2 => Result := Crypto.SEXT_H (Rs1_Val);
+                              when others        => Bad := True;
+                           end case;
+                        when 2#0010100# =>
+                           --  bseti
+                           Result := Crypto.BSET (Rs1_Val, Word (Shamt));
+                        when 2#0100100# =>
+                           --  bclri
+                           Result := Crypto.BCLR (Rs1_Val, Word (Shamt));
+                        when 2#0110100# =>
+                           --  binvi
+                           Result := Crypto.BINV (Rs1_Val, Word (Shamt));
+                        when 2#0000100# =>
+                           --  zip (Zbkb, RV32 only): rs2 = 01111
+                           if Shamt = 15 then
+                              Result := Crypto.ZIP (Rs1_Val);
+                           else
+                              Bad := True;
+                           end if;
+                        when 2#0001000# =>
+                           --  SHA-256 / SM3 unary ops, rs2 selects
+                           case Word (Decoded.Rs2) is
+                              when SHA256_SUM0_RS2 => Result := Crypto.SHA256SUM0 (Rs1_Val);
+                              when SHA256_SUM1_RS2 => Result := Crypto.SHA256SUM1 (Rs1_Val);
+                              when SHA256_SIG0_RS2 => Result := Crypto.SHA256SIG0 (Rs1_Val);
+                              when SHA256_SIG1_RS2 => Result := Crypto.SHA256SIG1 (Rs1_Val);
+                              when SM3P0_RS2       => Result := Crypto.SM3P0 (Rs1_Val);
+                              when SM3P1_RS2       => Result := Crypto.SM3P1 (Rs1_Val);
+                              when others          => Bad := True;
+                           end case;
+                        when others =>
+                           Bad := True;
+                     end case;
                   when FUNCT3_SRL_SRA =>
-                     if (Instruction and 16#0200_0000#) /= 0 then
-                        --  RV32: instruction bit 25 set => shamt >= 32, illegal
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
-                        return;
-                     end if;
-                     if Decoded.Funct7 = FUNCT7_ORC_B and
-                           Word (Decoded.Rs2) = ZBB_ORCB_RS2
-                     then
-                        --  orc.b rd, rs1 (funct7=0010100, rs2=7)
-                        Result := Crypto.ORC_B (Rs1_Val);
-                     elsif Decoded.Funct7 = FUNCT7_BCLR then
-                        --  bexti rd, rs1, imm (funct7=0100100, funct3=101)
-                        Result := Crypto.BEXT (Rs1_Val, Word (Shamt));
-                     elsif Decoded.Funct7 = FUNCT7_ROR then
-                        --  rori rd, rs1, shamt
-                        Result := Crypto.RORI (Rs1_Val, Shamt);
-                     elsif Decoded.Funct7 = FUNCT7_REV8 and
-                           Word (Decoded.Rs2) = 16#18#
-                     then
-                        --  rev8 rd, rs1 (funct7=0110100, rs2=11000)
-                        Result := Crypto.REV8 (Rs1_Val);
-                     elsif Decoded.Funct7 = FUNCT7_BREV8 and
-                           Word (Decoded.Rs2) = 7
-                     then
-                        --  brev8 rd, rs1 (funct7=0110100, rs2=00111)
-                        Result := Crypto.BREV8 (Rs1_Val);
-                     elsif Decoded.Funct7 = FUNCT7_UNZIP and Shamt = 15 then
-                        --  unzip rd, rs1 (funct7=0000100, shamt=15)
-                        Result := Crypto.UNZIP (Rs1_Val);
-                     elsif Decoded.Funct7 = FUNCT7_ALT then
-                        Result := Shift_Right_Arithmetic (Rs1_Val, Shamt);
-                     else
-                        Result := Shift_Right_Logical (Rs1_Val, Shamt);
-                     end if;
+                     case Decoded.Funct7 is
+                        when 2#0000000# =>
+                           Result := Shift_Right_Logical (Rs1_Val, Shamt);
+                        when 2#0100000# =>
+                           Result := Shift_Right_Arithmetic (Rs1_Val, Shamt);
+                        when 2#0110000# =>
+                           --  rori
+                           Result := Crypto.RORI (Rs1_Val, Shamt);
+                        when 2#0100100# =>
+                           --  bexti
+                           Result := Crypto.BEXT (Rs1_Val, Word (Shamt));
+                        when 2#0010100# =>
+                           --  orc.b: rs2 = 00111
+                           if Word (Decoded.Rs2) = ZBB_ORCB_RS2 then
+                              Result := Crypto.ORC_B (Rs1_Val);
+                           else
+                              Bad := True;
+                           end if;
+                        when 2#0110100# =>
+                           --  rev8 (rs2 = 11000) and brev8 (rs2 = 00111)
+                           if Word (Decoded.Rs2) = 16#18# then
+                              Result := Crypto.REV8 (Rs1_Val);
+                           elsif Word (Decoded.Rs2) = 7 then
+                              Result := Crypto.BREV8 (Rs1_Val);
+                           else
+                              Bad := True;
+                           end if;
+                        when 2#0000100# =>
+                           --  unzip (Zbkb, RV32 only): rs2 = 01111
+                           if Shamt = 15 then
+                              Result := Crypto.UNZIP (Rs1_Val);
+                           else
+                              Bad := True;
+                           end if;
+                        when others =>
+                           Bad := True;
+                     end case;
                   when others =>
-                     CPU.Exception_Code := Illegal_Instruction;
-                     Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
-                     return;
+                     Bad := True;
                end case;
+
+               if Bad then
+                  CPU.Exception_Code := Illegal_Instruction;
+                  Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
+                  return;
+               end if;
             end;
 
             Write_Register (CPU, Decoded.Rd, Result);
@@ -534,220 +534,170 @@ package body RISCV.CPU is
                   Shift_Right (Instruction, 25) and 16#1F#;
                BS     : constant Natural :=
                   Natural (Shift_Right (Instruction, 30));
-               K_Handled : Boolean := False;
+               Bad    : Boolean := False;
             begin
-               if Decoded.Funct7 = FUNCT7_MULDIV then
-                  --  M extension
-                  case Decoded.Funct3 is
-                     when FUNCT3_MUL =>
-                        Result := Mul (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 2;   --  3 cycles total
-                     when FUNCT3_MULH =>
-                        Result := Mulh (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 2;
-                     when FUNCT3_MULHSU =>
-                        Result := Mulhsu (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 2;
-                     when FUNCT3_MULHU =>
-                        Result := Mulhu (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 2;
-                     when FUNCT3_DIV =>
-                        Result := Div (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 32;  --  33 cycles total
-                     when FUNCT3_DIVU =>
-                        Result := Divu (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 32;
-                     when FUNCT3_REM =>
-                        Result := Op_Rem (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 32;
-                     when FUNCT3_REMU =>
-                        Result := Remu (Rs1_Val, Rs2_Val);
-                        Extra_Cycles := 32;
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
-                        return;
-                  end case;
-               else
-                  --  Check K extension instructions first
-                  K_Handled := True;
-                  case Decoded.Funct3 is
-                     when FUNCT3_ADD_SUB =>
-                        --  funct3=000: AES/SM4 (bs in [31:30])
-                        case Funct5 is
-                           when FUNCT5_AES32ESI =>
-                              Result := Crypto.AES32ESI (Rs1_Val, Rs2_Val, BS);
-                           when FUNCT5_AES32ESMI =>
-                              Result := Crypto.AES32ESMI (Rs1_Val, Rs2_Val, BS);
-                           when FUNCT5_AES32DSI =>
-                              Result := Crypto.AES32DSI (Rs1_Val, Rs2_Val, BS);
-                           when FUNCT5_AES32DSMI =>
-                              Result := Crypto.AES32DSMI (Rs1_Val, Rs2_Val, BS);
-                           when FUNCT5_SM4ED =>
-                              Result := Crypto.SM4ED (Rs1_Val, Rs2_Val, BS);
-                           when FUNCT5_SM4KS =>
-                              Result := Crypto.SM4KS (Rs1_Val, Rs2_Val, BS);
-                           when others =>
-                              K_Handled := False;
-                        end case;
-                     when FUNCT3_SLL =>
-                        --  funct3=001
-                        if Decoded.Funct7 = FUNCT7_ROL then
-                           Result := Crypto.ROL (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_CLMUL then
-                           Result := Crypto.CLMUL (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_BSET then
-                           Result := Crypto.BSET (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_BCLR then
-                           Result := Crypto.BCLR (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_BINV then
-                           Result := Crypto.BINV (Rs1_Val, Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when FUNCT3_SLT =>
-                        --  funct3=010: xperm4, sh1add
-                        if Decoded.Funct7 = FUNCT7_XPERM4 then
-                           Result := Crypto.XPERM4 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_ZBA then
-                           --  sh1add rd, rs1, rs2: rd = rs2 + (rs1 << 1)
-                           Result := Add (Shift_Left_Logical (Rs1_Val, 1), Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when FUNCT3_SLTU =>
-                        --  funct3=011: clmulh
-                        if Decoded.Funct7 = FUNCT7_CLMULH then
-                           Result := Crypto.CLMULH (Rs1_Val, Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when FUNCT3_XOR =>
-                        --  funct3=100: xnor, pack/zext.h, xperm8, min, sh2add
-                        if Decoded.Funct7 = FUNCT7_ANDN then
-                           Result := Crypto.XNOR_Op (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_PACK then
-                           Result := Crypto.PACK (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_XPERM8 then
-                           Result := Crypto.XPERM8 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MIN (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_ZBA then
-                           --  sh2add rd, rs1, rs2: rd = rs2 + (rs1 << 2)
-                           Result := Add (Shift_Left_Logical (Rs1_Val, 2), Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when FUNCT3_SRL_SRA =>
-                        --  funct3=101: ror, minu, bext
-                        if Decoded.Funct7 = FUNCT7_ROR then
-                           Result := Crypto.ROR_Op (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MINU (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_BCLR then
-                           Result := Crypto.BEXT (Rs1_Val, Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when FUNCT3_OR =>
-                        --  funct3=110: orn, max, sh3add
-                        if Decoded.Funct7 = FUNCT7_ORN then
-                           Result := Crypto.ORN (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MAX (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_ZBA then
-                           --  sh3add rd, rs1, rs2: rd = rs2 + (rs1 << 3)
-                           Result := Add (Shift_Left_Logical (Rs1_Val, 3), Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when FUNCT3_AND =>
-                        --  funct3=111: andn, packh, maxu
-                        if Decoded.Funct7 = FUNCT7_ANDN then
-                           Result := Crypto.ANDN (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_PACKH then
-                           Result := Crypto.PACKH (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MAXU (Rs1_Val, Rs2_Val);
-                        else
-                           K_Handled := False;
-                        end if;
-                     when others =>
-                        K_Handled := False;
-                  end case;
-
-                  if not K_Handled then
-                     --  SHA-512 paired ops (funct3=000)
-                     if Decoded.Funct3 = FUNCT3_ADD_SUB then
+               --  Dispatch on funct7 and then funct3. Every pair not listed
+               --  is reserved and traps, rather than running as whichever
+               --  base op shares its funct3.
+               case Decoded.Funct7 is
+                  when 2#0000000# =>
+                     case Decoded.Funct3 is
+                        when FUNCT3_ADD_SUB => Result := Add (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLL     => Result := Shift_Left_Logical (Rs1_Val, Shamt);
+                        when FUNCT3_SLT     => Result := Set_Less_Than (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLTU    => Result := Set_Less_Than_Unsigned (Rs1_Val, Rs2_Val);
+                        when FUNCT3_XOR     => Result := Op_Xor (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Shift_Right_Logical (Rs1_Val, Shamt);
+                        when FUNCT3_OR      => Result := Op_Or (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND     => Result := Op_And (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0100000# =>
+                     --  sub, sra, and the Zbb/Zbkb inverted logic ops
+                     case Decoded.Funct3 is
+                        when FUNCT3_ADD_SUB => Result := Sub (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Shift_Right_Arithmetic (Rs1_Val, Shamt);
+                        when FUNCT3_XOR     => Result := Crypto.XNOR_Op (Rs1_Val, Rs2_Val);
+                        when FUNCT3_OR      => Result := Crypto.ORN (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND     => Result := Crypto.ANDN (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0000001# =>
+                     --  M extension
+                     case Decoded.Funct3 is
+                        when FUNCT3_MUL =>
+                           Result := Mul (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 2;   --  3 cycles total
+                        when FUNCT3_MULH =>
+                           Result := Mulh (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 2;
+                        when FUNCT3_MULHSU =>
+                           Result := Mulhsu (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 2;
+                        when FUNCT3_MULHU =>
+                           Result := Mulhu (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 2;
+                        when FUNCT3_DIV =>
+                           Result := Div (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 32;  --  33 cycles total
+                        when FUNCT3_DIVU =>
+                           Result := Divu (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 32;
+                        when FUNCT3_REM =>
+                           Result := Op_Rem (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 32;
+                        when FUNCT3_REMU =>
+                           Result := Remu (Rs1_Val, Rs2_Val);
+                           Extra_Cycles := 32;
+                        when others =>
+                           Bad := True;
+                     end case;
+                  when 2#0010000# =>
+                     --  Zba: sh1add / sh2add / sh3add
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLT => Result := Add (Shift_Left_Logical (Rs1_Val, 1), Rs2_Val);
+                        when FUNCT3_XOR => Result := Add (Shift_Left_Logical (Rs1_Val, 2), Rs2_Val);
+                        when FUNCT3_OR  => Result := Add (Shift_Left_Logical (Rs1_Val, 3), Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0000101# =>
+                     --  Zbc/Zbkc carry-less multiply, Zbb min/max
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.CLMUL (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLT     => Result := Crypto.CLMULR (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLTU    => Result := Crypto.CLMULH (Rs1_Val, Rs2_Val);
+                        when FUNCT3_XOR     => Result := Crypto.ZBB_MIN (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.ZBB_MINU (Rs1_Val, Rs2_Val);
+                        when FUNCT3_OR      => Result := Crypto.ZBB_MAX (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND     => Result := Crypto.ZBB_MAXU (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0110000# =>
+                     --  Zbb/Zbkb rotates
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.ROL (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.ROR_Op (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0000111# =>
+                     --  Zicond
+                     case Decoded.Funct3 is
+                        when FUNCT3_SRL_SRA =>
+                           --  czero.eqz: rd = (rs2 == 0) ? 0 : rs1
+                           Result := (if Rs2_Val = 0 then 0 else Rs1_Val);
+                        when FUNCT3_AND =>
+                           --  czero.nez: rd = (rs2 != 0) ? 0 : rs1
+                           Result := (if Rs2_Val /= 0 then 0 else Rs1_Val);
+                        when others =>
+                           Bad := True;
+                     end case;
+                  when 2#0010100# =>
+                     --  Zbs bset, Zbkx xperm4 / xperm8
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL => Result := Crypto.BSET (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLT => Result := Crypto.XPERM4 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_XOR => Result := Crypto.XPERM8 (Rs1_Val, Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0100100# =>
+                     --  Zbs bclr / bext
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.BCLR (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.BEXT (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0110100# =>
+                     --  Zbs binv
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL => Result := Crypto.BINV (Rs1_Val, Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0000100# =>
+                     --  Zbkb pack (zext.h when rs2 = x0) / packh
+                     case Decoded.Funct3 is
+                        when FUNCT3_XOR => Result := Crypto.PACK (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND => Result := Crypto.PACKH (Rs1_Val, Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0101110# | 2#0101010# | 2#0101111# |
+                       2#0101011# | 2#0101000# | 2#0101001# =>
+                     --  Zknh SHA-512 paired ops (RV32), funct3 = 000 only
+                     if Decoded.Funct3 /= FUNCT3_ADD_SUB then
+                        Bad := True;
+                     else
                         case Decoded.Funct7 is
-                           when FUNCT7_SHA512SIG0H =>
-                              Result := Crypto.SHA512SIG0H (Rs1_Val, Rs2_Val);
-                              K_Handled := True;
-                           when FUNCT7_SHA512SIG0L =>
-                              Result := Crypto.SHA512SIG0L (Rs1_Val, Rs2_Val);
-                              K_Handled := True;
-                           when FUNCT7_SHA512SIG1H =>
-                              Result := Crypto.SHA512SIG1H (Rs1_Val, Rs2_Val);
-                              K_Handled := True;
-                           when FUNCT7_SHA512SIG1L =>
-                              Result := Crypto.SHA512SIG1L (Rs1_Val, Rs2_Val);
-                              K_Handled := True;
-                           when FUNCT7_SHA512SUM0R =>
-                              Result := Crypto.SHA512SUM0R (Rs1_Val, Rs2_Val);
-                              K_Handled := True;
-                           when FUNCT7_SHA512SUM1R =>
-                              Result := Crypto.SHA512SUM1R (Rs1_Val, Rs2_Val);
-                              K_Handled := True;
-                           when others =>
-                              null;
+                           when 2#0101110# => Result := Crypto.SHA512SIG0H (Rs1_Val, Rs2_Val);
+                           when 2#0101010# => Result := Crypto.SHA512SIG0L (Rs1_Val, Rs2_Val);
+                           when 2#0101111# => Result := Crypto.SHA512SIG1H (Rs1_Val, Rs2_Val);
+                           when 2#0101011# => Result := Crypto.SHA512SIG1L (Rs1_Val, Rs2_Val);
+                           when 2#0101000# => Result := Crypto.SHA512SUM0R (Rs1_Val, Rs2_Val);
+                           when 2#0101001# => Result := Crypto.SHA512SUM1R (Rs1_Val, Rs2_Val);
+                           when others     => Bad := True;
                         end case;
                      end if;
-                  end if;
+                  when others =>
+                     --  AES / SM4 (Zkne, Zknd, Zksed): funct3 = 000,
+                     --  funct5 in [29:25], byte select in [31:30]. Their
+                     --  funct7 values collide with none of the choices above.
+                     if Decoded.Funct3 /= FUNCT3_ADD_SUB then
+                        Bad := True;
+                     else
+                        case Funct5 is
+                           when FUNCT5_AES32ESI  => Result := Crypto.AES32ESI (Rs1_Val, Rs2_Val, BS);
+                           when FUNCT5_AES32ESMI => Result := Crypto.AES32ESMI (Rs1_Val, Rs2_Val, BS);
+                           when FUNCT5_AES32DSI  => Result := Crypto.AES32DSI (Rs1_Val, Rs2_Val, BS);
+                           when FUNCT5_AES32DSMI => Result := Crypto.AES32DSMI (Rs1_Val, Rs2_Val, BS);
+                           when FUNCT5_SM4ED     => Result := Crypto.SM4ED (Rs1_Val, Rs2_Val, BS);
+                           when FUNCT5_SM4KS     => Result := Crypto.SM4KS (Rs1_Val, Rs2_Val, BS);
+                           when others           => Bad := True;
+                        end case;
+                     end if;
+               end case;
 
-                  if not K_Handled then
-                     --  Base RV32I
-                     case Decoded.Funct3 is
-                        when FUNCT3_ADD_SUB =>
-                           if Decoded.Funct7 = FUNCT7_ALT then
-                              Result := Sub (Rs1_Val, Rs2_Val);
-                           else
-                              Result := Add (Rs1_Val, Rs2_Val);
-                           end if;
-                        when FUNCT3_SLL =>
-                           Result := Shift_Left_Logical (Rs1_Val, Shamt);
-                        when FUNCT3_SLT =>
-                           Result := Set_Less_Than (Rs1_Val, Rs2_Val);
-                        when FUNCT3_SLTU =>
-                           Result := Set_Less_Than_Unsigned (Rs1_Val, Rs2_Val);
-                        when FUNCT3_XOR =>
-                           Result := Op_Xor (Rs1_Val, Rs2_Val);
-                        when FUNCT3_SRL_SRA =>
-                           if Decoded.Funct7 = FUNCT7_ZICOND then
-                              --  czero.eqz: rd = (rs2 == 0) ? 0 : rs1
-                              Result :=
-                                 (if Rs2_Val = 0 then 0 else Rs1_Val);
-                           elsif Decoded.Funct7 = FUNCT7_ALT then
-                              Result := Shift_Right_Arithmetic (Rs1_Val, Shamt);
-                           else
-                              Result := Shift_Right_Logical (Rs1_Val, Shamt);
-                           end if;
-                        when FUNCT3_OR =>
-                           Result := Op_Or (Rs1_Val, Rs2_Val);
-                        when FUNCT3_AND =>
-                           if Decoded.Funct7 = FUNCT7_ZICOND then
-                              --  czero.nez: rd = (rs2 != 0) ? 0 : rs1
-                              Result :=
-                                 (if Rs2_Val /= 0 then 0 else Rs1_Val);
-                           else
-                              Result := Op_And (Rs1_Val, Rs2_Val);
-                           end if;
-                        when others =>
-                           CPU.Exception_Code := Illegal_Instruction;
-                           Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN,
-                                       Instruction);
-                           return;
-                     end case;
-                  end if;
+               if Bad then
+                  CPU.Exception_Code := Illegal_Instruction;
+                  Trap_Entry (CPU, CSR.CAUSE_ILLEGAL_INSN, Instruction);
+                  return;
                end if;
             end;
 

@@ -105,6 +105,11 @@ DIS := $(OUT)/dis
         rv64-atomic-test run-rv64-atomic-test \
         rv64-zba64-test run-rv64-zba64-test \
         rv64-zicond-test run-rv64-zicond-test \
+        rv64-zbs64-test run-rv64-zbs64-test \
+        rv64-zbc64-test run-rv64-zbc64-test \
+        rv64-zbkx64-test run-rv64-zbkx64-test \
+        rv64-zbkb64-test run-rv64-zbkb64-test \
+        rv64-reserved-test run-rv64-reserved-test \
         prtos-test run-prtos-test \
         prtos2-test run-prtos2-test \
         virtio-blk-test run-virtio-blk-test \
@@ -190,6 +195,11 @@ all: $(BIN)/hello.bin $(BIN)/echo.bin $(BIN)/forth.bin $(BIN)/fibonacci.bin $(BI
      $(ELF)/rv64-atomic-test.elf \
      $(ELF)/rv64-zba64-test.elf \
      $(ELF)/rv64-zicond-test.elf \
+     $(ELF)/rv64-zbs64-test.elf \
+     $(ELF)/rv64-zbc64-test.elf \
+     $(ELF)/rv64-zbkx64-test.elf \
+     $(ELF)/rv64-zbkb64-test.elf \
+     $(ELF)/rv64-reserved-test.elf \
      $(BIN)/prtos-test.bin \
      $(BIN)/prtos2-test.bin \
      $(BIN)/virtio-blk-test.bin \
@@ -2041,6 +2051,86 @@ run-rv64-zbb64-test: $(ELF)/rv64-zbb64-test.elf
 	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $<
 	@echo ""
 	@cat $(LOG_DIR)/rv64-zbb64-test.log 2>/dev/null || echo "(rv64-zbb64-test.log not found)"
+
+# Build rv64-zbs64-test (Zbs single-bit: bset/bclr/binv/bext)
+$(ELF)/rv64-zbs64-test.elf: crt0-64.S log64.c rv64-zbs64-test.c hello64.ld | $(ELF)
+	$(CC) -march=rv64imafd_zbs -mabi=$(ABI64) -mcmodel=medany -nostdlib -nostartfiles -fno-builtin -O2 -g -Wall \
+	      $(LDFLAGS64) -o $@ crt0-64.S log64.c rv64-zbs64-test.c
+	$(SIZE) $@
+
+rv64-zbs64-test: $(ELF)/rv64-zbs64-test.elf
+
+run-rv64-zbs64-test: $(ELF)/rv64-zbs64-test.elf
+	@echo ""
+	@echo "=== Running RV64 Zbs single-bit: bset/bclr/binv/bext ==="
+	@echo ""
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $<
+	@echo ""
+	@cat $(LOG_DIR)/rv64-zbs64-test.log 2>/dev/null || echo "(rv64-zbs64-test.log not found)"
+
+# Build rv64-zbc64-test (Zbc/Zbkc carry-less multiply)
+$(ELF)/rv64-zbc64-test.elf: crt0-64.S log64.c rv64-zbc64-test.c hello64.ld | $(ELF)
+	$(CC) -march=rv64imafd_zbc -mabi=$(ABI64) -mcmodel=medany -nostdlib -nostartfiles -fno-builtin -O2 -g -Wall \
+	      $(LDFLAGS64) -o $@ crt0-64.S log64.c rv64-zbc64-test.c
+	$(SIZE) $@
+
+rv64-zbc64-test: $(ELF)/rv64-zbc64-test.elf
+
+run-rv64-zbc64-test: $(ELF)/rv64-zbc64-test.elf
+	@echo ""
+	@echo "=== Running RV64 Zbc/Zbkc carry-less multiply ==="
+	@echo ""
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $<
+	@echo ""
+	@cat $(LOG_DIR)/rv64-zbc64-test.log 2>/dev/null || echo "(rv64-zbc64-test.log not found)"
+
+# Build rv64-zbkx64-test (Zbkx crossbar: xperm4/xperm8)
+$(ELF)/rv64-zbkx64-test.elf: crt0-64.S log64.c rv64-zbkx64-test.c hello64.ld | $(ELF)
+	$(CC) -march=rv64imafd_zbkx -mabi=$(ABI64) -mcmodel=medany -nostdlib -nostartfiles -fno-builtin -O2 -g -Wall \
+	      $(LDFLAGS64) -o $@ crt0-64.S log64.c rv64-zbkx64-test.c
+	$(SIZE) $@
+
+rv64-zbkx64-test: $(ELF)/rv64-zbkx64-test.elf
+
+run-rv64-zbkx64-test: $(ELF)/rv64-zbkx64-test.elf
+	@echo ""
+	@echo "=== Running RV64 Zbkx crossbar: xperm4/xperm8 ==="
+	@echo ""
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $<
+	@echo ""
+	@cat $(LOG_DIR)/rv64-zbkx64-test.log 2>/dev/null || echo "(rv64-zbkx64-test.log not found)"
+
+# Build rv64-zbkb64-test (Zbkb pack/packh/packw/brev8)
+$(ELF)/rv64-zbkb64-test.elf: crt0-64.S log64.c rv64-zbkb64-test.c hello64.ld | $(ELF)
+	$(CC) -march=rv64imafd_zbkb -mabi=$(ABI64) -mcmodel=medany -nostdlib -nostartfiles -fno-builtin -O2 -g -Wall \
+	      $(LDFLAGS64) -o $@ crt0-64.S log64.c rv64-zbkb64-test.c
+	$(SIZE) $@
+
+rv64-zbkb64-test: $(ELF)/rv64-zbkb64-test.elf
+
+run-rv64-zbkb64-test: $(ELF)/rv64-zbkb64-test.elf
+	@echo ""
+	@echo "=== Running RV64 Zbkb pack/packh/packw/brev8 ==="
+	@echo ""
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $<
+	@echo ""
+	@cat $(LOG_DIR)/rv64-zbkb64-test.log 2>/dev/null || echo "(rv64-zbkb64-test.log not found)"
+
+# Build rv64-reserved-test (reserved-encoding trap coverage)
+$(ELF)/rv64-reserved-test.elf: crt0-64.S log64.c rv64-reserved-test.c hello64.ld | $(ELF)
+	$(CC) -march=rv64imafd_zbs_zbc_zbkb_zbkx -mabi=$(ABI64) -mcmodel=medany -nostdlib -nostartfiles -fno-builtin -O2 -g -Wall \
+	      $(LDFLAGS64) -o $@ crt0-64.S log64.c rv64-reserved-test.c
+	$(SIZE) $@
+
+rv64-reserved-test: $(ELF)/rv64-reserved-test.elf
+
+run-rv64-reserved-test: $(ELF)/rv64-reserved-test.elf
+	@echo ""
+	@echo "=== Running RV64 reserved-encoding trap coverage ==="
+	@echo ""
+	$(EMULATOR) $(LOGFLAGS) --machine qemu-virt -q $<
+	@echo ""
+	@cat $(LOG_DIR)/rv64-reserved-test.log 2>/dev/null || echo "(rv64-reserved-test.log not found)"
 
 # Build rv64-atomic-test (RV64 A extension: LR.D/SC.D + all AMO.D variants)
 $(ELF)/rv64-atomic-test.elf: crt0-64.S log64.c rv64-atomic-test.c hello64.ld | $(ELF)

@@ -21,7 +21,7 @@ The RISC-V emulator includes several independent layers of testing:
 
 | Layer | Command | Scope |
 |-------|---------|-------|
-| Bare-metal test suite | `cd programs && ./test-all.sh` | 78 programs, 2189 assertions |
+| Bare-metal test suite | `cd programs && ./test-all.sh` | 83 programs, 2263 assertions |
 | Ada unit tests | `make test` | Peripherals, traps, CSRs, atomics, compressed, vector |
 | Official riscv-tests | `bash programs/run-riscv-tests.sh` | 284/293 upstream conformance tests |
 | Architecture compliance | `arch-test/run_arch_tests.sh <suite>` | riscv-arch-test, 7 suites (see below) |
@@ -95,13 +95,13 @@ pthread-test                   7      0 OK
 pipeline-test                  6      0 OK
 
 ---                         ----   ----
-TOTAL                       2189      0
+TOTAL                       2263      0
 
-All tests PASSED (2189 assertions).
+All tests PASSED (2263 assertions).
 ```
 
 Per-test output is written to `programs/logs/`. See [STATUS.md](STATUS.md) for
-the full inventory of all 78 tests and what each one asserts.
+the full inventory of all 83 tests and what each one asserts.
 
 ### Run Individual Tests
 
@@ -121,7 +121,7 @@ make run-test-runner
 ## Example Programs
 
 A guided tour of eight representative programs. These are examples, not the
-whole suite - `test-all.sh` runs 78 programs; see [STATUS.md](STATUS.md) for the
+whole suite - `test-all.sh` runs 83 programs; see [STATUS.md](STATUS.md) for the
 complete inventory.
 
 ### 1. hello.c - Basic Output Test

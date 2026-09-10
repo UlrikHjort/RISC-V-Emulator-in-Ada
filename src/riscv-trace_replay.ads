@@ -39,6 +39,19 @@
 --    Runs the emulator and checks PC / Rd_Value / Next_PC against each
 --    recorded entry.  Prints a MISMATCH line and stops on the first
 --    divergence.
+--
+--  RV64 record format (32 bytes per instruction):
+--    Offset  0 : PC       (Double_Word)
+--    Offset  8 : Encoding (Word) - instructions stay 32 bits wide
+--    Offset 12 : Rd       (Word)
+--    Offset 16 : Rd_Value (Double_Word) - the full 64-bit register value
+--    Offset 24 : Next_PC  (Double_Word)
+--
+--  The two formats are distinct and not interchangeable: a 64-bit trace has
+--  to carry the whole register, or a divergence in the upper half would go
+--  unnoticed. Neither file carries a header, so Open_For_Replay_64 checks
+--  the file length is a whole number of 32-byte records and reports
+--  Replay_Error when a 32-bit trace is fed to an RV64 run.
 
 with Ada.Sequential_IO;
 
@@ -119,5 +132,70 @@ package RISCV.Trace_Replay is
                          Msg_Len        : out Natural);
 
    procedure Close_Replayer (State : in out Replayer_State);
+
+   --  =====================================================================
+   --  RV64 recorder / replayer
+   --  =====================================================================
+
+   type Trace_Record_64 is record
+      PC       : Double_Word;
+      Encoding : Word;
+      Rd       : Word;
+      Rd_Value : Double_Word;
+      Next_PC  : Double_Word;
+   end record;
+
+   for Trace_Record_64 use record
+      PC       at  0 range 0 .. 63;
+      Encoding at  8 range 0 .. 31;
+      Rd       at 12 range 0 .. 31;
+      Rd_Value at 16 range 0 .. 63;
+      Next_PC  at 24 range 0 .. 63;
+   end record;
+   for Trace_Record_64'Size use 256;
+
+   package Trace_IO_64 is new Ada.Sequential_IO (Trace_Record_64);
+
+   type Recorder_State_64 is record
+      File   : Trace_IO_64.File_Type;
+      Open   : Boolean := False;
+      Count  : Long_Long_Integer := 0;
+   end record;
+
+   procedure Open_For_Recording_64 (State    : out Recorder_State_64;
+                                    Filename : String);
+
+   procedure Append_64 (State    : in out Recorder_State_64;
+                        PC       : Double_Word;
+                        Encoding : Word;
+                        Rd       : Word;
+                        Rd_Value : Double_Word;
+                        Next_PC  : Double_Word);
+
+   procedure Close_Recorder_64 (State : in out Recorder_State_64);
+
+   type Replayer_State_64 is record
+      File        : Trace_IO_64.File_Type;
+      Open        : Boolean := False;
+      Step_Count  : Long_Long_Integer := 0;
+      Mismatches  : Long_Long_Integer := 0;
+      Bad_Format  : Boolean := False;
+   end record;
+
+   --  Sets Bad_Format when the file is not a whole number of 32-byte
+   --  records, which is what a 32-bit trace looks like from here.
+   procedure Open_For_Replay_64 (State    : out Replayer_State_64;
+                                 Filename : String);
+
+   procedure Check_Step_64 (State           : in out Replayer_State_64;
+                            Actual_PC       : Double_Word;
+                            Actual_Next_PC  : Double_Word;
+                            Actual_Rd       : Word;
+                            Actual_Rd_Value : Double_Word;
+                            Result          : out Replay_Result;
+                            Mismatch_Msg    : out String;
+                            Msg_Len         : out Natural);
+
+   procedure Close_Replayer_64 (State : in out Replayer_State_64);
 
 end RISCV.Trace_Replay;

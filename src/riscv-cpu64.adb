@@ -106,6 +106,7 @@ package body RISCV.CPU64 is
       CPU.Reservation_Valid := False;
       CPU.Reserved_Addr     := 0;
       CPU.Priv_Mode         := Machine;
+      CPU.Hart_ID           := 0;
       FPU.Initialize (CPU.FP);
       Vector.Initialize (CPU.VU);
       CSR64.Initialize (CPU.CSRs);
@@ -475,7 +476,8 @@ package body RISCV.CPU64 is
             Put (To_Hex64 (Double_Word (CPU.PC)) & ":  " &
                  To_Hex (Instruction) & "  ");
          end if;
-         Put_Line (Disasm.Disassemble (Instruction, Word (CPU.PC)));
+         Put_Line (Disasm.Disassemble (Instruction, Word (CPU.PC),
+                                       Xlen64 => True));
       end if;
 
       --  Read source registers
@@ -731,6 +733,14 @@ package body RISCV.CPU64 is
                Shamt : constant Natural :=
                   Natural (To_Word (Decoded.Imm_I) and 16#3F#);
                Imm64 : constant Double_Word := SE (Decoded.Imm_I);
+               --  On RV64 funct6 (instruction[31:26]) selects the shift-
+               --  immediate family, since bit 25 is shamt[5]. The unary ops
+               --  that reuse those slots are identified by the whole imm12.
+               F6    : constant Word :=
+                  Shift_Right (Instruction, 26) and 16#3F#;
+               Imm12 : constant Word :=
+                  Shift_Right (Instruction, 20) and 16#FFF#;
+               Bad   : Boolean := False;
             begin
                case Decoded.Funct3 is
                   when FUNCT3_ADD_SUB =>
@@ -746,48 +756,81 @@ package body RISCV.CPU64 is
                   when FUNCT3_AND =>
                      Result := Op_And (Rs1_Val, Imm64);
                   when FUNCT3_SLL =>
-                     --  Zbb unary ops share funct3=001, funct7=FUNCT7_ROL
-                     if Decoded.Funct7 = FUNCT7_ROL then
-                        case Word (Decoded.Rs2) is
-                           when ZBB_CLZ_RS2   => Result := Crypto.CLZ64    (Rs1_Val);
-                           when ZBB_CTZ_RS2   => Result := Crypto.CTZ64    (Rs1_Val);
-                           when ZBB_CPOP_RS2  => Result := Crypto.CPOP64   (Rs1_Val);
-                           when ZBB_SEXTB_RS2 => Result := Crypto.SEXT_B64 (Rs1_Val);
-                           when ZBB_SEXTH_RS2 => Result := Crypto.SEXT_H64 (Rs1_Val);
-                           when others        => Result := Shift_Left_Logical (Rs1_Val, Shamt);
-                        end case;
-                     else
-                        --  SLLI: shift amount in lower 6 bits of imm
-                        Result := Shift_Left_Logical (Rs1_Val, Shamt);
-                     end if;
+                     --  Every funct6 not listed is reserved and traps. It
+                     --  used to fall through to SLLI, so bseti/bclri/binvi
+                     --  ran as a plain shift and returned a wrong value.
+                     case F6 is
+                        when 2#000000# =>
+                           Result := Shift_Left_Logical (Rs1_Val, Shamt);
+                        when 2#001010# =>
+                           --  bseti
+                           Result := Crypto.BSET64 (Rs1_Val, Double_Word (Shamt));
+                        when 2#010010# =>
+                           --  bclri
+                           Result := Crypto.BCLR64 (Rs1_Val, Double_Word (Shamt));
+                        when 2#011010# =>
+                           --  binvi
+                           Result := Crypto.BINV64 (Rs1_Val, Double_Word (Shamt));
+                        when 2#011000# =>
+                           --  Zbb unary ops: funct7 = 0110000, rs2 selects
+                           if Decoded.Funct7 /= FUNCT7_ROL then
+                              Bad := True;
+                           else
+                              case Word (Decoded.Rs2) is
+                                 when ZBB_CLZ_RS2   => Result := Crypto.CLZ64    (Rs1_Val);
+                                 when ZBB_CTZ_RS2   => Result := Crypto.CTZ64    (Rs1_Val);
+                                 when ZBB_CPOP_RS2  => Result := Crypto.CPOP64   (Rs1_Val);
+                                 when ZBB_SEXTB_RS2 => Result := Crypto.SEXT_B64 (Rs1_Val);
+                                 when ZBB_SEXTH_RS2 => Result := Crypto.SEXT_H64 (Rs1_Val);
+                                 when others        => Bad := True;
+                              end case;
+                           end if;
+                        when others =>
+                           Bad := True;
+                     end case;
                   when FUNCT3_SRL_SRA =>
-                     --  REV8 (RV64): funct7=0110101, rs2=11000
-                     if Decoded.Funct7 = FUNCT7_REV8_64 and
-                           Word (Decoded.Rs2) = 16#18#
-                     then
-                        Result := Crypto.REV8_64 (Rs1_Val);
-                     --  ORC.B: funct7=0010100, rs2=00111
-                     elsif Decoded.Funct7 = FUNCT7_ORC_B and
-                           Word (Decoded.Rs2) = ZBB_ORCB_RS2
-                     then
-                        Result := Crypto.ORC_B64 (Rs1_Val);
-                     --  RORI: 6-bit shamt, funct6=011000 (low funct7 bit is
-                     --  shamt[5], so mask it off before comparing)
-                     elsif (Decoded.Funct7 and 2#1111110#) = FUNCT7_ROR then
-                        Result := Crypto.RORI64 (Rs1_Val, Shamt);
-                     --  Check bit 30 of instruction to distinguish SRLI vs SRAI
-                     elsif (Instruction and Shift_Left (1, 30)) /= 0 then
-                        Result := Shift_Right_Arithmetic (Rs1_Val, Shamt);
-                     else
-                        Result := Shift_Right_Logical (Rs1_Val, Shamt);
-                     end if;
+                     case F6 is
+                        when 2#000000# =>
+                           Result := Shift_Right_Logical (Rs1_Val, Shamt);
+                        when 2#010000# =>
+                           Result := Shift_Right_Arithmetic (Rs1_Val, Shamt);
+                        when 2#011000# =>
+                           --  rori
+                           Result := Crypto.RORI64 (Rs1_Val, Shamt);
+                        when 2#010010# =>
+                           --  bexti
+                           Result := Crypto.BEXT64 (Rs1_Val, Double_Word (Shamt));
+                        when 2#011010# =>
+                           if Imm12 = 16#6B8# then
+                              --  rev8 (RV64): funct7=0110101, rs2=11000
+                              Result := Crypto.REV8_64 (Rs1_Val);
+                           elsif Imm12 = 16#687# then
+                              --  brev8: funct7=0110100, rs2=00111
+                              Result := Crypto.BREV8_64 (Rs1_Val);
+                           else
+                              Bad := True;
+                           end if;
+                        when 2#001010# =>
+                           if Imm12 = 16#287# then
+                              --  orc.b: funct7=0010100, rs2=00111
+                              Result := Crypto.ORC_B64 (Rs1_Val);
+                           else
+                              Bad := True;
+                           end if;
+                        when others =>
+                           Bad := True;
+                     end case;
                   when others =>
-                     CPU.Exception_Code := Illegal_Instruction;
-                     Trap_Entry (CPU,
-                                 Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                 Double_Word (Instruction));
-                     return;
+                     Bad := True;
                end case;
+
+               if Bad then
+                  CPU.Exception_Code := Illegal_Instruction;
+                  Trap_Entry (CPU,
+                              Double_Word (CSR.CAUSE_ILLEGAL_INSN),
+                              Double_Word (Instruction));
+                  return;
+               end if;
             end;
 
             Write_Register (CPU, Decoded.Rd, Result);
@@ -800,6 +843,7 @@ package body RISCV.CPU64 is
                --  5-bit shamt for W-suffix shift operations
                Shamt5 : constant Natural :=
                   Natural (To_Word (Decoded.Imm_I) and 16#1F#);
+               Bad    : Boolean := False;
             begin
                case Decoded.Funct3 is
                   when FUNCT3_ADD_SUB =>
@@ -807,11 +851,9 @@ package body RISCV.CPU64 is
                      Result := SE32 (Word (Rs1_Val and 16#FFFF_FFFF#) +
                                      Word (SE (Decoded.Imm_I) and 16#FFFF_FFFF#));
                   when FUNCT3_SLL =>
-                     --  Zbb W-variants: CLZW/CTZW/CPOPW use funct7=FUNCT7_ROL.
-                     --  Zba SLLI.UW uses funct6=000010 (funct7 & ~1 = FUNCT7_PACK)
-                     --  and a 6-bit shamt (result is full 64-bit, NOT truncated).
                      if (Decoded.Funct7 and 2#1111110#) = FUNCT7_PACK then
                         --  SLLI.UW: rd = zero_extend32(rs1[31:0]) << shamt6
+                        --  (6-bit shamt, result not truncated)
                         Result := Shift_Left_Logical
                            (Rs1_Val and 16#FFFF_FFFF#,
                             Natural (To_Word (Decoded.Imm_I) and 16#3F#));
@@ -820,30 +862,36 @@ package body RISCV.CPU64 is
                            when ZBB_CLZ_RS2  => Result := Crypto.CLZW  (Rs1_Val);
                            when ZBB_CTZ_RS2  => Result := Crypto.CTZW  (Rs1_Val);
                            when ZBB_CPOP_RS2 => Result := Crypto.CPOPW (Rs1_Val);
-                           when others       => Result := Sllw (Rs1_Val, Shamt5);
+                           when others       => Bad := True;
                         end case;
-                     else
+                     elsif Decoded.Funct7 = 0 then
                         --  SLLIW: rd = sign_extend32(rs1[31:0] << shamt5)
                         Result := Sllw (Rs1_Val, Shamt5);
+                     else
+                        Bad := True;
                      end if;
                   when FUNCT3_SRL_SRA =>
-                     if Decoded.Funct7 = FUNCT7_ROR then
+                     if Decoded.Funct7 = 0 then
+                        Result := Srlw (Rs1_Val, Shamt5);
+                     elsif Decoded.Funct7 = FUNCT7_ALT then
+                        Result := Sraw (Rs1_Val, Shamt5);
+                     elsif Decoded.Funct7 = FUNCT7_ROR then
                         --  RORIW: rotate-right of lower 32 bits, sign-extended
                         Result := Crypto.RORW (Rs1_Val, Double_Word (Shamt5));
-                     elsif (Instruction and Shift_Left (1, 30)) /= 0 then
-                        --  SRAIW: arithmetic right shift of lower 32 bits
-                        Result := Sraw (Rs1_Val, Shamt5);
                      else
-                        --  SRLIW: logical right shift of lower 32 bits
-                        Result := Srlw (Rs1_Val, Shamt5);
+                        Bad := True;
                      end if;
                   when others =>
-                     CPU.Exception_Code := Illegal_Instruction;
-                     Trap_Entry (CPU,
-                                 Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                 Double_Word (Instruction));
-                     return;
+                     Bad := True;
                end case;
+
+               if Bad then
+                  CPU.Exception_Code := Illegal_Instruction;
+                  Trap_Entry (CPU,
+                              Double_Word (CSR.CAUSE_ILLEGAL_INSN),
+                              Double_Word (Instruction));
+                  return;
+               end if;
             end;
 
             Write_Register (CPU, Decoded.Rd, Result);
@@ -856,123 +904,125 @@ package body RISCV.CPU64 is
                --  6-bit shamt in RV64 register-register shifts
                Shamt6 : constant Natural :=
                   Natural (Rs2_Val and 16#3F#);
+               Bad    : Boolean := False;
             begin
-               if Decoded.Funct7 = FUNCT7_MULDIV then
-                  --  M extension (64-bit)
-                  case Decoded.Funct3 is
-                     when FUNCT3_MUL =>
-                        Result := Mul (Rs1_Val, Rs2_Val);
-                     when FUNCT3_MULH =>
-                        Result := Mulh (Rs1_Val, Rs2_Val);
-                     when FUNCT3_MULHSU =>
-                        Result := Mulhsu (Rs1_Val, Rs2_Val);
-                     when FUNCT3_MULHU =>
-                        Result := Mulhu (Rs1_Val, Rs2_Val);
-                     when FUNCT3_DIV =>
-                        Result := Div (Rs1_Val, Rs2_Val);
-                     when FUNCT3_DIVU =>
-                        Result := Divu (Rs1_Val, Rs2_Val);
-                     when FUNCT3_REM =>
-                        Result := Op_Rem (Rs1_Val, Rs2_Val);
-                     when FUNCT3_REMU =>
-                        Result := Remu (Rs1_Val, Rs2_Val);
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
-               elsif Decoded.Funct7 = FUNCT7_ZBA then
-                  --  Zba: sh1add / sh2add / sh3add (64-bit)
-                  case Decoded.Funct3 is
-                     when FUNCT3_SLT =>
-                        --  sh1add rd, rs1, rs2: rd = rs2 + (rs1 << 1)
-                        Result := Add (Shift_Left_Logical (Rs1_Val, 1), Rs2_Val);
-                     when FUNCT3_XOR =>
-                        --  sh2add rd, rs1, rs2: rd = rs2 + (rs1 << 2)
-                        Result := Add (Shift_Left_Logical (Rs1_Val, 2), Rs2_Val);
-                     when FUNCT3_OR =>
-                        --  sh3add rd, rs1, rs2: rd = rs2 + (rs1 << 3)
-                        Result := Add (Shift_Left_Logical (Rs1_Val, 3), Rs2_Val);
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
-               else
-                  --  Base RV64I (with Zbb register-register ops interleaved:
-                  --  they share funct3 values with base ops and are selected
-                  --  by funct7 -- FUNCT7_ANDN/ORN=0x20, FUNCT7_MINMAX=0x05,
-                  --  FUNCT7_ROL/ROR=0x30).
-                  case Decoded.Funct3 is
-                     when FUNCT3_ADD_SUB =>
-                        if Decoded.Funct7 = FUNCT7_ALT then
-                           Result := Sub (Rs1_Val, Rs2_Val);
-                        else
-                           Result := Add (Rs1_Val, Rs2_Val);
-                        end if;
-                     when FUNCT3_SLL =>
-                        if Decoded.Funct7 = FUNCT7_ROL then
-                           Result := Crypto.ROL64 (Rs1_Val, Rs2_Val);
-                        else
-                           Result := Shift_Left_Logical (Rs1_Val, Shamt6);
-                        end if;
-                     when FUNCT3_SLT =>
-                        Result := Set_Less_Than (Rs1_Val, Rs2_Val);
-                     when FUNCT3_SLTU =>
-                        Result := Set_Less_Than_Unsigned (Rs1_Val, Rs2_Val);
-                     when FUNCT3_XOR =>
-                        if Decoded.Funct7 = FUNCT7_ANDN then
-                           Result := Crypto.XNOR64 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MIN64 (Rs1_Val, Rs2_Val);
-                        else
-                           Result := Op_Xor (Rs1_Val, Rs2_Val);
-                        end if;
-                     when FUNCT3_SRL_SRA =>
-                        if Decoded.Funct7 = FUNCT7_ZICOND then
+               --  Dispatch on funct7 and then funct3. Every pair not listed
+               --  is reserved and traps, rather than running as whichever
+               --  base op shares its funct3 -- which is how clmul used to
+               --  execute as sll and bset as sll.
+               case Decoded.Funct7 is
+                  when 2#0000000# =>
+                     case Decoded.Funct3 is
+                        when FUNCT3_ADD_SUB => Result := Add (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLL     => Result := Shift_Left_Logical (Rs1_Val, Shamt6);
+                        when FUNCT3_SLT     => Result := Set_Less_Than (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLTU    => Result := Set_Less_Than_Unsigned (Rs1_Val, Rs2_Val);
+                        when FUNCT3_XOR     => Result := Op_Xor (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Shift_Right_Logical (Rs1_Val, Shamt6);
+                        when FUNCT3_OR      => Result := Op_Or (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND     => Result := Op_And (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0100000# =>
+                     --  sub, sra, and the Zbb/Zbkb inverted logic ops
+                     case Decoded.Funct3 is
+                        when FUNCT3_ADD_SUB => Result := Sub (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Shift_Right_Arithmetic (Rs1_Val, Shamt6);
+                        when FUNCT3_XOR     => Result := Crypto.XNOR64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_OR      => Result := Crypto.ORN64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND     => Result := Crypto.ANDN64 (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0000001# =>
+                     --  M extension (64-bit)
+                     case Decoded.Funct3 is
+                        when FUNCT3_MUL    => Result := Mul (Rs1_Val, Rs2_Val);
+                        when FUNCT3_MULH   => Result := Mulh (Rs1_Val, Rs2_Val);
+                        when FUNCT3_MULHSU => Result := Mulhsu (Rs1_Val, Rs2_Val);
+                        when FUNCT3_MULHU  => Result := Mulhu (Rs1_Val, Rs2_Val);
+                        when FUNCT3_DIV    => Result := Div (Rs1_Val, Rs2_Val);
+                        when FUNCT3_DIVU   => Result := Divu (Rs1_Val, Rs2_Val);
+                        when FUNCT3_REM    => Result := Op_Rem (Rs1_Val, Rs2_Val);
+                        when FUNCT3_REMU   => Result := Remu (Rs1_Val, Rs2_Val);
+                        when others        => Bad := True;
+                     end case;
+                  when 2#0010000# =>
+                     --  Zba: sh1add / sh2add / sh3add
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLT => Result := Add (Shift_Left_Logical (Rs1_Val, 1), Rs2_Val);
+                        when FUNCT3_XOR => Result := Add (Shift_Left_Logical (Rs1_Val, 2), Rs2_Val);
+                        when FUNCT3_OR  => Result := Add (Shift_Left_Logical (Rs1_Val, 3), Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0000101# =>
+                     --  Zbc/Zbkc carry-less multiply, Zbb min/max
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.CLMUL64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLT     => Result := Crypto.CLMULR64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLTU    => Result := Crypto.CLMULH64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_XOR     => Result := Crypto.ZBB_MIN64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.ZBB_MINU64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_OR      => Result := Crypto.ZBB_MAX64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND     => Result := Crypto.ZBB_MAXU64 (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0110000# =>
+                     --  Zbb/Zbkb rotates
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.ROL64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.ROR64 (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0000111# =>
+                     --  Zicond
+                     case Decoded.Funct3 is
+                        when FUNCT3_SRL_SRA =>
                            --  czero.eqz: rd = (rs2 == 0) ? 0 : rs1
-                           Result :=
-                              (if Rs2_Val = 0 then 0 else Rs1_Val);
-                        elsif Decoded.Funct7 = FUNCT7_ROR then
-                           Result := Crypto.ROR64 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MINU64 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_ALT then
-                           Result := Shift_Right_Arithmetic (Rs1_Val, Shamt6);
-                        else
-                           Result := Shift_Right_Logical (Rs1_Val, Shamt6);
-                        end if;
-                     when FUNCT3_OR =>
-                        if Decoded.Funct7 = FUNCT7_ORN then
-                           Result := Crypto.ORN64 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MAX64 (Rs1_Val, Rs2_Val);
-                        else
-                           Result := Op_Or (Rs1_Val, Rs2_Val);
-                        end if;
-                     when FUNCT3_AND =>
-                        if Decoded.Funct7 = FUNCT7_ZICOND then
+                           Result := (if Rs2_Val = 0 then 0 else Rs1_Val);
+                        when FUNCT3_AND =>
                            --  czero.nez: rd = (rs2 != 0) ? 0 : rs1
-                           Result :=
-                              (if Rs2_Val /= 0 then 0 else Rs1_Val);
-                        elsif Decoded.Funct7 = FUNCT7_ANDN then
-                           Result := Crypto.ANDN64 (Rs1_Val, Rs2_Val);
-                        elsif Decoded.Funct7 = FUNCT7_MINMAX then
-                           Result := Crypto.ZBB_MAXU64 (Rs1_Val, Rs2_Val);
-                        else
-                           Result := Op_And (Rs1_Val, Rs2_Val);
-                        end if;
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
+                           Result := (if Rs2_Val /= 0 then 0 else Rs1_Val);
+                        when others =>
+                           Bad := True;
+                     end case;
+                  when 2#0010100# =>
+                     --  Zbs bset, Zbkx xperm4 / xperm8
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL => Result := Crypto.BSET64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLT => Result := Crypto.XPERM4_64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_XOR => Result := Crypto.XPERM8_64 (Rs1_Val, Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0100100# =>
+                     --  Zbs bclr / bext
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.BCLR64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.BEXT64 (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0110100# =>
+                     --  Zbs binv
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL => Result := Crypto.BINV64 (Rs1_Val, Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when 2#0000100# =>
+                     --  Zbkb pack / packh
+                     case Decoded.Funct3 is
+                        when FUNCT3_XOR => Result := Crypto.PACK64 (Rs1_Val, Rs2_Val);
+                        when FUNCT3_AND => Result := Crypto.PACKH64 (Rs1_Val, Rs2_Val);
+                        when others     => Bad := True;
+                     end case;
+                  when others =>
+                     Bad := True;
+               end case;
+
+               if Bad then
+                  CPU.Exception_Code := Illegal_Instruction;
+                  Trap_Entry (CPU,
+                              Double_Word (CSR.CAUSE_ILLEGAL_INSN),
+                              Double_Word (Instruction));
+                  return;
                end if;
             end;
 
@@ -984,109 +1034,73 @@ package body RISCV.CPU64 is
          when OPCODE_OP_32 =>
             declare
                Shamt5 : constant Natural := Natural (Rs2_Val and 16#1F#);
+               Bad    : Boolean := False;
             begin
-               if Decoded.Funct7 = FUNCT7_MULDIV then
-                  --  RV64M W-suffix multiply/divide
-                  case Decoded.Funct3 is
-                     when FUNCT3_MUL =>
-                        Result := Mulw (Rs1_Val, Rs2_Val);
-                     when FUNCT3_DIV =>
-                        Result := Divw (Rs1_Val, Rs2_Val);
-                     when FUNCT3_DIVU =>
-                        Result := Divuw (Rs1_Val, Rs2_Val);
-                     when FUNCT3_REM =>
-                        Result := Remw (Rs1_Val, Rs2_Val);
-                     when FUNCT3_REMU =>
-                        Result := Remuw (Rs1_Val, Rs2_Val);
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
-               elsif Decoded.Funct7 = FUNCT7_ROL then
-                  --  Zbb W-rotates: ROLW (funct3=001) / RORW (funct3=101)
-                  case Decoded.Funct3 is
-                     when FUNCT3_SLL =>
-                        Result := Crypto.ROLW (Rs1_Val, Rs2_Val);
-                     when FUNCT3_SRL_SRA =>
-                        Result := Crypto.RORW (Rs1_Val, Rs2_Val);
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
-               elsif Decoded.Funct7 = FUNCT7_PACK and
-                     Word (Decoded.Rs2) = 0 and
-                     Decoded.Funct3 = FUNCT3_XOR
-               then
-                  --  ZEXT.H (RV64): OP-32, funct7=FUNCT7_PACK, funct3=100, rs2=0
-                  Result := Crypto.ZEXT_H64 (Rs1_Val);
-               elsif Decoded.Funct7 = FUNCT7_PACK and
-                     Decoded.Funct3 = FUNCT3_ADD_SUB
-               then
-                  --  add.uw: rd = rs2 + zero_extend(rs1[31:0])
-                  Result := Add (Rs1_Val and 16#FFFF_FFFF#, Rs2_Val);
-               elsif Decoded.Funct7 = FUNCT7_ZBA then
-                  --  Zba .UW variants: zero-extend lower 32 bits of rs1
-                  declare
-                     Rs1_Zext : constant Double_Word :=
-                        Rs1_Val and 16#FFFF_FFFF#;
-                  begin
+               case Decoded.Funct7 is
+                  when 2#0000000# =>
                      case Decoded.Funct3 is
-                        when FUNCT3_SLT =>
-                           --  sh1add.uw: rd = rs2 + (zext(rs1[31:0]) << 1)
-                           Result :=
-                              Add (Shift_Left_Logical (Rs1_Zext, 1), Rs2_Val);
-                        when FUNCT3_XOR =>
-                           --  sh2add.uw: rd = rs2 + (zext(rs1[31:0]) << 2)
-                           Result :=
-                              Add (Shift_Left_Logical (Rs1_Zext, 2), Rs2_Val);
-                        when FUNCT3_OR =>
-                           --  sh3add.uw: rd = rs2 + (zext(rs1[31:0]) << 3)
-                           Result :=
-                              Add (Shift_Left_Logical (Rs1_Zext, 3), Rs2_Val);
-                        when others =>
-                           CPU.Exception_Code := Illegal_Instruction;
-                           Trap_Entry (CPU,
-                                       Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                       Double_Word (Instruction));
-                           return;
+                        when FUNCT3_ADD_SUB => Result := Addw (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SLL     => Result := Sllw (Rs1_Val, Shamt5);
+                        when FUNCT3_SRL_SRA => Result := Srlw (Rs1_Val, Shamt5);
+                        when others         => Bad := True;
                      end case;
-                  end;
-               elsif Decoded.Funct7 = FUNCT7_ALT then
-                  --  SUBW / SRAW
-                  case Decoded.Funct3 is
-                     when FUNCT3_ADD_SUB =>
-                        Result := Subw (Rs1_Val, Rs2_Val);
-                     when FUNCT3_SRL_SRA =>
-                        Result := Sraw (Rs1_Val, Shamt5);
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
-               else
-                  --  ADDW / SLLW / SRLW (funct7=0)
-                  case Decoded.Funct3 is
-                     when FUNCT3_ADD_SUB =>
-                        Result := Addw (Rs1_Val, Rs2_Val);
-                     when FUNCT3_SLL =>
-                        Result := Sllw (Rs1_Val, Shamt5);
-                     when FUNCT3_SRL_SRA =>
-                        Result := Srlw (Rs1_Val, Shamt5);
-                     when others =>
-                        CPU.Exception_Code := Illegal_Instruction;
-                        Trap_Entry (CPU,
-                                    Double_Word (CSR.CAUSE_ILLEGAL_INSN),
-                                    Double_Word (Instruction));
-                        return;
-                  end case;
+                  when 2#0100000# =>
+                     case Decoded.Funct3 is
+                        when FUNCT3_ADD_SUB => Result := Subw (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Sraw (Rs1_Val, Shamt5);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0000001# =>
+                     --  RV64M W-suffix multiply/divide
+                     case Decoded.Funct3 is
+                        when FUNCT3_MUL  => Result := Mulw (Rs1_Val, Rs2_Val);
+                        when FUNCT3_DIV  => Result := Divw (Rs1_Val, Rs2_Val);
+                        when FUNCT3_DIVU => Result := Divuw (Rs1_Val, Rs2_Val);
+                        when FUNCT3_REM  => Result := Remw (Rs1_Val, Rs2_Val);
+                        when FUNCT3_REMU => Result := Remuw (Rs1_Val, Rs2_Val);
+                        when others      => Bad := True;
+                     end case;
+                  when 2#0110000# =>
+                     --  Zbb W-rotates
+                     case Decoded.Funct3 is
+                        when FUNCT3_SLL     => Result := Crypto.ROLW (Rs1_Val, Rs2_Val);
+                        when FUNCT3_SRL_SRA => Result := Crypto.RORW (Rs1_Val, Rs2_Val);
+                        when others         => Bad := True;
+                     end case;
+                  when 2#0000100# =>
+                     case Decoded.Funct3 is
+                        when FUNCT3_ADD_SUB =>
+                           --  add.uw: rd = rs2 + zero_extend(rs1[31:0])
+                           Result := Add (Rs1_Val and 16#FFFF_FFFF#, Rs2_Val);
+                        when FUNCT3_XOR =>
+                           --  packw; zext.h is packw with rs2 = x0
+                           Result := Crypto.PACKW (Rs1_Val, Rs2_Val);
+                        when others =>
+                           Bad := True;
+                     end case;
+                  when 2#0010000# =>
+                     --  Zba .uw variants: zero-extend lower 32 bits of rs1
+                     declare
+                        Rs1_Zext : constant Double_Word :=
+                           Rs1_Val and 16#FFFF_FFFF#;
+                     begin
+                        case Decoded.Funct3 is
+                           when FUNCT3_SLT => Result := Add (Shift_Left_Logical (Rs1_Zext, 1), Rs2_Val);
+                           when FUNCT3_XOR => Result := Add (Shift_Left_Logical (Rs1_Zext, 2), Rs2_Val);
+                           when FUNCT3_OR  => Result := Add (Shift_Left_Logical (Rs1_Zext, 3), Rs2_Val);
+                           when others     => Bad := True;
+                        end case;
+                     end;
+                  when others =>
+                     Bad := True;
+               end case;
+
+               if Bad then
+                  CPU.Exception_Code := Illegal_Instruction;
+                  Trap_Entry (CPU,
+                              Double_Word (CSR.CAUSE_ILLEGAL_INSN),
+                              Double_Word (Instruction));
+                  return;
                end if;
             end;
 
@@ -1752,7 +1766,7 @@ package body RISCV.CPU64 is
                                  begin
                                     if Mem.CLINT /= null then
                                        RISCV.CLINT.Set_Mtimecmp
-                                         (Mem.CLINT.all, Val);
+                                         (Mem.CLINT.all, Val, CPU.Hart_ID);
                                     end if;
                                     CSR64.Write (CPU.CSRs, CSR64.CSR_MIP,
                                                  Mip and not CSR64.MIE_STIE);
@@ -1816,7 +1830,7 @@ package body RISCV.CPU64 is
                                     begin
                                        if Mem.CLINT /= null then
                                           RISCV.CLINT.Set_Mtimecmp
-                                            (Mem.CLINT.all, Val);
+                                            (Mem.CLINT.all, Val, CPU.Hart_ID);
                                        end if;
                                        CSR64.Write (CPU.CSRs, CSR64.CSR_MIP,
                                                     Mip and not CSR64.MIE_STIE);
@@ -3398,12 +3412,12 @@ package body RISCV.CPU64 is
          Lo32    : Word;
       begin
          if Memory.CLINT_Enabled (Mem) then
-            if Memory.CLINT_Timer_Interrupt_Pending (Mem) then
+            if Memory.CLINT_Timer_Interrupt_Pending (Mem, CPU.Hart_ID) then
                New_Mip := New_Mip or CSR64.MIE_MTIE;
             else
                New_Mip := New_Mip and (not CSR64.MIE_MTIE);
             end if;
-            if Memory.CLINT_Software_Interrupt_Pending (Mem) then
+            if Memory.CLINT_Software_Interrupt_Pending (Mem, CPU.Hart_ID) then
                New_Mip := New_Mip or CSR64.MIE_MSIE;
             else
                New_Mip := New_Mip and (not CSR64.MIE_MSIE);

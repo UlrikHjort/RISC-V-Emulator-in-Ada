@@ -91,7 +91,9 @@ package body RISCV.Disasm is
    -- Disassemble --
    -----------------
 
-   function Disassemble (Instruction : Word; PC : Word) return String is
+   function Disassemble (Instruction : Word;
+                         PC          : Word;
+                         Xlen64      : Boolean := False) return String is
       use Decoder;
       D : constant Decoded_Instruction := Decode (Instruction);
 
@@ -219,11 +221,21 @@ package body RISCV.Disasm is
 
          when OPCODE_OP_IMM =>
             declare
-               Imm   : constant String := Signed_Imm (D.Imm_I);
-               Shamt : constant String :=
+               Imm     : constant String := Signed_Imm (D.Imm_I);
+               --  shamt is 6 bits on RV64, 5 on RV32
+               Sh_Mask : constant Word := (if Xlen64 then 16#3F# else 16#1F#);
+               Shamt   : constant String :=
                   Ada.Strings.Fixed.Trim
-                    (Natural'Image (Natural (To_Word (D.Imm_I) and 16#1F#)),
+                    (Natural'Image (Natural (To_Word (D.Imm_I) and Sh_Mask)),
                      Ada.Strings.Left);
+               F6      : constant Word :=
+                  Shift_Right (Instruction, 26) and 16#3F#;
+               Imm12   : constant Word :=
+                  Shift_Right (Instruction, 20) and 16#FFF#;
+               --  On RV32 bit 25 is not part of shamt, so when it is set
+               --  every shift-immediate form is reserved.
+               Sh_Bad  : constant Boolean :=
+                  not Xlen64 and then (Instruction and 16#0200_0000#) /= 0;
             begin
                case D.Funct3 is
                   when FUNCT3_ADD_SUB =>
@@ -268,17 +280,63 @@ package body RISCV.Disasm is
                            when SM3P1_RS2 =>
                               return "sm3p1   " & Rd & ", " & Rs1;
                            when others =>
-                              return "slli    " & Rd & ", " & Rs1 &
-                                     ", " & Shamt;
+                              return "???";
                         end case;
+                     elsif D.Funct7 = FUNCT7_ROL then
+                        case Word (D.Rs2) is
+                           when ZBB_CLZ_RS2   => return "clz     " & Rd & ", " & Rs1;
+                           when ZBB_CTZ_RS2   => return "ctz     " & Rd & ", " & Rs1;
+                           when ZBB_CPOP_RS2  => return "cpop    " & Rd & ", " & Rs1;
+                           when ZBB_SEXTB_RS2 => return "sext.b  " & Rd & ", " & Rs1;
+                           when ZBB_SEXTH_RS2 => return "sext.h  " & Rd & ", " & Rs1;
+                           when others        => return "???";
+                        end case;
+                     elsif not Xlen64 and then D.Funct7 = FUNCT7_ZIP
+                       and then Word (D.Rs2) = 15
+                     then
+                        return "zip     " & Rd & ", " & Rs1;
+                     elsif Sh_Bad then
+                        return "???";
                      else
-                        return "slli    " & Rd & ", " & Rs1 & ", " & Shamt;
+                        case F6 is
+                           when 2#000000# =>
+                              return "slli    " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when 2#001010# =>
+                              return "bseti   " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when 2#010010# =>
+                              return "bclri   " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when 2#011010# =>
+                              return "binvi   " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when others =>
+                              return "???";
+                        end case;
                      end if;
                   when FUNCT3_SRL_SRA =>
-                     if D.Funct7 = FUNCT7_ALT then
-                        return "srai    " & Rd & ", " & Rs1 & ", " & Shamt;
+                     if Imm12 = 16#287# then
+                        return "orc.b   " & Rd & ", " & Rs1;
+                     elsif Imm12 = (if Xlen64 then 16#6B8# else 16#698#) then
+                        return "rev8    " & Rd & ", " & Rs1;
+                     elsif Imm12 = 16#687# then
+                        return "brev8   " & Rd & ", " & Rs1;
+                     elsif not Xlen64 and then D.Funct7 = FUNCT7_UNZIP
+                       and then Word (D.Rs2) = 15
+                     then
+                        return "unzip   " & Rd & ", " & Rs1;
+                     elsif Sh_Bad then
+                        return "???";
                      else
-                        return "srli    " & Rd & ", " & Rs1 & ", " & Shamt;
+                        case F6 is
+                           when 2#000000# =>
+                              return "srli    " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when 2#010000# =>
+                              return "srai    " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when 2#011000# =>
+                              return "rori    " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when 2#010010# =>
+                              return "bexti   " & Rd & ", " & Rs1 & ", " & Shamt;
+                           when others =>
+                              return "???";
+                        end case;
                      end if;
                   when others =>
                      return "???";
@@ -365,6 +423,28 @@ package body RISCV.Disasm is
                   return "orn     " & Rd & ", " & Rs1 & ", " & Rs2;
                elsif D.Funct3 = FUNCT3_XOR and D.Funct7 = FUNCT7_ANDN then
                   return "xnor    " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct3 = FUNCT3_SLT and D.Funct7 = FUNCT7_CLMUL then
+                  return "clmulr  " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_MINMAX and D.Funct3 = FUNCT3_XOR then
+                  return "min     " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_MINMAX and D.Funct3 = FUNCT3_SRL_SRA then
+                  return "minu    " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_MINMAX and D.Funct3 = FUNCT3_OR then
+                  return "max     " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_MINMAX and D.Funct3 = FUNCT3_AND then
+                  return "maxu    " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_ZICOND and D.Funct3 = FUNCT3_SRL_SRA then
+                  return "czero.eqz " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_ZICOND and D.Funct3 = FUNCT3_AND then
+                  return "czero.nez " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_BSET and D.Funct3 = FUNCT3_SLL then
+                  return "bset    " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_BCLR and D.Funct3 = FUNCT3_SLL then
+                  return "bclr    " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_BCLR and D.Funct3 = FUNCT3_SRL_SRA then
+                  return "bext    " & Rd & ", " & Rs1 & ", " & Rs2;
+               elsif D.Funct7 = FUNCT7_BINV and D.Funct3 = FUNCT3_SLL then
+                  return "binv    " & Rd & ", " & Rs1 & ", " & Rs2;
                end if;
             end;
 
@@ -390,6 +470,15 @@ package body RISCV.Disasm is
                      return "???";
                end case;
             else
+               --  Only funct7 = 0000000, and 0100000 for sub/sra, are base
+               --  ops; any other funct7 that reaches here is reserved.
+               if D.Funct7 /= 0
+                 and then not (D.Funct7 = FUNCT7_ALT
+                               and then (D.Funct3 = FUNCT3_ADD_SUB
+                                         or else D.Funct3 = FUNCT3_SRL_SRA))
+               then
+                  return "???";
+               end if;
                case D.Funct3 is
                   when FUNCT3_ADD_SUB =>
                      if D.Funct7 = FUNCT7_ALT then
@@ -431,6 +520,113 @@ package body RISCV.Disasm is
                      return "???";
                end case;
             end if;
+
+         when OPCODE_OP_IMM_32 =>
+            declare
+               Imm    : constant String := Signed_Imm (D.Imm_I);
+               Shamt5 : constant String :=
+                  Ada.Strings.Fixed.Trim
+                    (Natural'Image (Natural (To_Word (D.Imm_I) and 16#1F#)),
+                     Ada.Strings.Left);
+               Shamt6 : constant String :=
+                  Ada.Strings.Fixed.Trim
+                    (Natural'Image (Natural (To_Word (D.Imm_I) and 16#3F#)),
+                     Ada.Strings.Left);
+            begin
+               case D.Funct3 is
+                  when FUNCT3_ADD_SUB =>
+                     if D.Imm_I = 0 then
+                        return "sext.w  " & Rd & ", " & Rs1;
+                     else
+                        return "addiw   " & Rd & ", " & Rs1 & ", " & Imm;
+                     end if;
+                  when FUNCT3_SLL =>
+                     if (D.Funct7 and 2#1111110#) = FUNCT7_PACK then
+                        return "slli.uw " & Rd & ", " & Rs1 & ", " & Shamt6;
+                     elsif D.Funct7 = FUNCT7_ROL then
+                        case Word (D.Rs2) is
+                           when ZBB_CLZ_RS2  => return "clzw    " & Rd & ", " & Rs1;
+                           when ZBB_CTZ_RS2  => return "ctzw    " & Rd & ", " & Rs1;
+                           when ZBB_CPOP_RS2 => return "cpopw   " & Rd & ", " & Rs1;
+                           when others       => return "???";
+                        end case;
+                     elsif D.Funct7 = 0 then
+                        return "slliw   " & Rd & ", " & Rs1 & ", " & Shamt5;
+                     else
+                        return "???";
+                     end if;
+                  when FUNCT3_SRL_SRA =>
+                     if D.Funct7 = 0 then
+                        return "srliw   " & Rd & ", " & Rs1 & ", " & Shamt5;
+                     elsif D.Funct7 = FUNCT7_ALT then
+                        return "sraiw   " & Rd & ", " & Rs1 & ", " & Shamt5;
+                     elsif D.Funct7 = FUNCT7_ROR then
+                        return "roriw   " & Rd & ", " & Rs1 & ", " & Shamt5;
+                     else
+                        return "???";
+                     end if;
+                  when others =>
+                     return "???";
+               end case;
+            end;
+
+         when OPCODE_OP_32 =>
+            case D.Funct7 is
+               when 2#0000000# =>
+                  case D.Funct3 is
+                     when FUNCT3_ADD_SUB => return "addw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_SLL     => return "sllw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_SRL_SRA => return "srlw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when others         => return "???";
+                  end case;
+               when 2#0100000# =>
+                  case D.Funct3 is
+                     when FUNCT3_ADD_SUB => return "subw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_SRL_SRA => return "sraw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when others         => return "???";
+                  end case;
+               when 2#0000001# =>
+                  case D.Funct3 is
+                     when FUNCT3_MUL  => return "mulw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_DIV  => return "divw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_DIVU => return "divuw   " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_REM  => return "remw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_REMU => return "remuw   " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when others      => return "???";
+                  end case;
+               when 2#0110000# =>
+                  case D.Funct3 is
+                     when FUNCT3_SLL     => return "rolw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_SRL_SRA => return "rorw    " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when others         => return "???";
+                  end case;
+               when 2#0000100# =>
+                  case D.Funct3 is
+                     when FUNCT3_ADD_SUB =>
+                        if D.Rs2 = 0 then
+                           return "zext.w  " & Rd & ", " & Rs1;
+                        else
+                           return "add.uw  " & Rd & ", " & Rs1 & ", " & Rs2;
+                        end if;
+                     when FUNCT3_XOR =>
+                        if D.Rs2 = 0 then
+                           return "zext.h  " & Rd & ", " & Rs1;
+                        else
+                           return "packw   " & Rd & ", " & Rs1 & ", " & Rs2;
+                        end if;
+                     when others =>
+                        return "???";
+                  end case;
+               when 2#0010000# =>
+                  case D.Funct3 is
+                     when FUNCT3_SLT => return "sh1add.uw " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_XOR => return "sh2add.uw " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when FUNCT3_OR  => return "sh3add.uw " & Rd & ", " & Rs1 & ", " & Rs2;
+                     when others     => return "???";
+                  end case;
+               when others =>
+                  return "???";
+            end case;
 
          when OPCODE_SYSTEM =>
             if D.Funct3 = FUNCT3_ECALL_EBREAK then

@@ -304,6 +304,17 @@ package body RISCV.Crypto is
       return Result;
    end CLMULH;
 
+   function CLMULR (Rs1, Rs2 : Word) return Word is
+      Result : Word := 0;
+   begin
+      for I in 0 .. 31 loop
+         if (Rs2 and Shift_Left (1, I)) /= 0 then
+            Result := Result xor Shift_Right (Rs1, 31 - I);
+         end if;
+      end loop;
+      return Result;
+   end CLMULR;
+
    ----------------
    -- Zbkx
    ----------------
@@ -860,5 +871,146 @@ package body RISCV.Crypto is
    begin
       if Rs1 > Rs2 then return Rs1; else return Rs2; end if;
    end ZBB_MAXU64;
+
+   -- -------------------------------------------------------------------------
+   --  Zbs: 64-bit variants (RV64) -- shift amount is Rs2[5:0]
+   -- -------------------------------------------------------------------------
+
+   function BSET64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Shamt : constant Natural := Natural (Rs2 and 16#3F#);
+   begin
+      return Rs1 or Shift_Left (Double_Word (1), Shamt);
+   end BSET64;
+
+   function BCLR64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Shamt : constant Natural := Natural (Rs2 and 16#3F#);
+   begin
+      return Rs1 and not Shift_Left (Double_Word (1), Shamt);
+   end BCLR64;
+
+   function BINV64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Shamt : constant Natural := Natural (Rs2 and 16#3F#);
+   begin
+      return Rs1 xor Shift_Left (Double_Word (1), Shamt);
+   end BINV64;
+
+   function BEXT64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Shamt : constant Natural := Natural (Rs2 and 16#3F#);
+   begin
+      return Shift_Right (Rs1, Shamt) and 1;
+   end BEXT64;
+
+   -- -------------------------------------------------------------------------
+   --  Zbc / Zbkc: 64-bit carry-less multiply
+   -- -------------------------------------------------------------------------
+
+   --  Low 64 bits of the 128-bit carry-less product.
+   function CLMUL64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Result : Double_Word := 0;
+   begin
+      for I in 0 .. 63 loop
+         if (Rs2 and Shift_Left (Double_Word (1), I)) /= 0 then
+            Result := Result xor Shift_Left (Rs1, I);
+         end if;
+      end loop;
+      return Result;
+   end CLMUL64;
+
+   --  High 64 bits of the 128-bit carry-less product.
+   function CLMULH64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Result : Double_Word := 0;
+   begin
+      for I in 1 .. 63 loop
+         if (Rs2 and Shift_Left (Double_Word (1), I)) /= 0 then
+            Result := Result xor Shift_Right (Rs1, 64 - I);
+         end if;
+      end loop;
+      return Result;
+   end CLMULH64;
+
+   --  Bits [126:63] of the 128-bit carry-less product (Zbc clmulr).
+   function CLMULR64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Result : Double_Word := 0;
+   begin
+      for I in 0 .. 63 loop
+         if (Rs2 and Shift_Left (Double_Word (1), I)) /= 0 then
+            Result := Result xor Shift_Right (Rs1, 63 - I);
+         end if;
+      end loop;
+      return Result;
+   end CLMULR64;
+
+   -- -------------------------------------------------------------------------
+   --  Zbkx: 64-bit crossbar permutations
+   -- -------------------------------------------------------------------------
+
+   --  An index past the end of Rs1 selects zero, per the spec: for xperm4
+   --  every 4-bit index is in range on RV64 (16 nibbles), for xperm8 an
+   --  index of 8 or more is out of range.
+   function XPERM4_64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Result : Double_Word := 0;
+      Idx    : Natural;
+   begin
+      for I in 0 .. 15 loop
+         Idx := Natural (Shift_Right (Rs2, I * 4) and 16#F#);
+         Result := Result or
+           Shift_Left (Shift_Right (Rs1, Idx * 4) and 16#F#, I * 4);
+      end loop;
+      return Result;
+   end XPERM4_64;
+
+   function XPERM8_64 (Rs1, Rs2 : Double_Word) return Double_Word is
+      Result : Double_Word := 0;
+      Idx    : Natural;
+   begin
+      for I in 0 .. 7 loop
+         Idx := Natural (Shift_Right (Rs2, I * 8) and 16#FF#);
+         if Idx < 8 then
+            Result := Result or
+              Shift_Left (Shift_Right (Rs1, Idx * 8) and 16#FF#, I * 8);
+         end if;
+      end loop;
+      return Result;
+   end XPERM8_64;
+
+   -- -------------------------------------------------------------------------
+   --  Zbkb: 64-bit variants (RV64)
+   -- -------------------------------------------------------------------------
+
+   function PACK64 (Rs1, Rs2 : Double_Word) return Double_Word is
+   begin
+      return (Rs1 and 16#FFFF_FFFF#) or
+             Shift_Left (Rs2 and 16#FFFF_FFFF#, 32);
+   end PACK64;
+
+   function PACKH64 (Rs1, Rs2 : Double_Word) return Double_Word is
+   begin
+      return (Rs1 and 16#FF#) or Shift_Left (Rs2 and 16#FF#, 8);
+   end PACKH64;
+
+   function PACKW (Rs1, Rs2 : Double_Word) return Double_Word is
+   begin
+      return Sign_Extend_32
+        ((Rs1 and 16#FFFF#) or Shift_Left (Rs2 and 16#FFFF#, 16));
+   end PACKW;
+
+   --  Reverse the bit order within each of the eight bytes.
+   function BREV8_64 (Rs1 : Double_Word) return Double_Word is
+      Result : Double_Word := 0;
+      B      : Double_Word;
+      Rev    : Double_Word;
+   begin
+      for Bi in 0 .. 7 loop
+         B   := Shift_Right (Rs1, Bi * 8) and 16#FF#;
+         Rev := 0;
+         for Bit in 0 .. 7 loop
+            if (B and Shift_Left (Double_Word (1), Bit)) /= 0 then
+               Rev := Rev or Shift_Left (Double_Word (1), 7 - Bit);
+            end if;
+         end loop;
+         Result := Result or Shift_Left (Rev, Bi * 8);
+      end loop;
+      return Result;
+   end BREV8_64;
 
 end RISCV.Crypto;

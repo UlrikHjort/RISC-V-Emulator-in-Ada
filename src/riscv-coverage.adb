@@ -64,6 +64,14 @@ package body RISCV.Coverage is
       end if;
    end Record_PC;
 
+   procedure Record_PC (State : in out Coverage_State;
+                        PC    : Memory_Address_64) is
+   begin
+      if PC <= Memory_Address_64 (Memory_Address'Last) then
+         Record_PC (State, Memory_Address (PC));
+      end if;
+   end Record_PC;
+
    -----------------
    -- Dump_Report --
    -----------------

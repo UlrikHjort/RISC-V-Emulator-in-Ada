@@ -58,6 +58,9 @@ package RISCV.CPU64 is
       MMU               : RISCV.MMU.MMU_State;
       --  RV64E: 16-register subset
       Rv32e             : Boolean := False;
+      --  Hart identifier (0 = boot hart). Selects this hart's CLINT
+      --  mtimecmp/msip lane, exactly as on the 32-bit core.
+      Hart_ID           : Natural := 0;
    end record;
 
    --  Initialize CPU state

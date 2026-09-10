@@ -24,6 +24,7 @@
 -- ***************************************************************************
 with Ada.Text_IO;
 with Ada.Strings.Fixed;
+with RISCV.FPU;
 
 package body RISCV.GDB is
 
@@ -120,6 +121,43 @@ package body RISCV.GDB is
       "    <reg name=""t5""   bitsize=""64"" regnum=""30""/>" & ASCII.LF &
       "    <reg name=""t6""   bitsize=""64"" regnum=""31""/>" & ASCII.LF &
       "    <reg name=""pc""   bitsize=""64"" type=""code_ptr"" regnum=""32""/>" & ASCII.LF &
+      "  </feature>" & ASCII.LF &
+      "  <feature name=""org.gnu.gdb.riscv.fpu"">" & ASCII.LF &
+      "    <reg name=""ft0""   bitsize=""64"" type=""ieee_double"" regnum=""33""/>" & ASCII.LF &
+      "    <reg name=""ft1""   bitsize=""64"" type=""ieee_double"" regnum=""34""/>" & ASCII.LF &
+      "    <reg name=""ft2""   bitsize=""64"" type=""ieee_double"" regnum=""35""/>" & ASCII.LF &
+      "    <reg name=""ft3""   bitsize=""64"" type=""ieee_double"" regnum=""36""/>" & ASCII.LF &
+      "    <reg name=""ft4""   bitsize=""64"" type=""ieee_double"" regnum=""37""/>" & ASCII.LF &
+      "    <reg name=""ft5""   bitsize=""64"" type=""ieee_double"" regnum=""38""/>" & ASCII.LF &
+      "    <reg name=""ft6""   bitsize=""64"" type=""ieee_double"" regnum=""39""/>" & ASCII.LF &
+      "    <reg name=""ft7""   bitsize=""64"" type=""ieee_double"" regnum=""40""/>" & ASCII.LF &
+      "    <reg name=""fs0""   bitsize=""64"" type=""ieee_double"" regnum=""41""/>" & ASCII.LF &
+      "    <reg name=""fs1""   bitsize=""64"" type=""ieee_double"" regnum=""42""/>" & ASCII.LF &
+      "    <reg name=""fa0""   bitsize=""64"" type=""ieee_double"" regnum=""43""/>" & ASCII.LF &
+      "    <reg name=""fa1""   bitsize=""64"" type=""ieee_double"" regnum=""44""/>" & ASCII.LF &
+      "    <reg name=""fa2""   bitsize=""64"" type=""ieee_double"" regnum=""45""/>" & ASCII.LF &
+      "    <reg name=""fa3""   bitsize=""64"" type=""ieee_double"" regnum=""46""/>" & ASCII.LF &
+      "    <reg name=""fa4""   bitsize=""64"" type=""ieee_double"" regnum=""47""/>" & ASCII.LF &
+      "    <reg name=""fa5""   bitsize=""64"" type=""ieee_double"" regnum=""48""/>" & ASCII.LF &
+      "    <reg name=""fa6""   bitsize=""64"" type=""ieee_double"" regnum=""49""/>" & ASCII.LF &
+      "    <reg name=""fa7""   bitsize=""64"" type=""ieee_double"" regnum=""50""/>" & ASCII.LF &
+      "    <reg name=""fs2""   bitsize=""64"" type=""ieee_double"" regnum=""51""/>" & ASCII.LF &
+      "    <reg name=""fs3""   bitsize=""64"" type=""ieee_double"" regnum=""52""/>" & ASCII.LF &
+      "    <reg name=""fs4""   bitsize=""64"" type=""ieee_double"" regnum=""53""/>" & ASCII.LF &
+      "    <reg name=""fs5""   bitsize=""64"" type=""ieee_double"" regnum=""54""/>" & ASCII.LF &
+      "    <reg name=""fs6""   bitsize=""64"" type=""ieee_double"" regnum=""55""/>" & ASCII.LF &
+      "    <reg name=""fs7""   bitsize=""64"" type=""ieee_double"" regnum=""56""/>" & ASCII.LF &
+      "    <reg name=""fs8""   bitsize=""64"" type=""ieee_double"" regnum=""57""/>" & ASCII.LF &
+      "    <reg name=""fs9""   bitsize=""64"" type=""ieee_double"" regnum=""58""/>" & ASCII.LF &
+      "    <reg name=""fs10""  bitsize=""64"" type=""ieee_double"" regnum=""59""/>" & ASCII.LF &
+      "    <reg name=""fs11""  bitsize=""64"" type=""ieee_double"" regnum=""60""/>" & ASCII.LF &
+      "    <reg name=""ft8""   bitsize=""64"" type=""ieee_double"" regnum=""61""/>" & ASCII.LF &
+      "    <reg name=""ft9""   bitsize=""64"" type=""ieee_double"" regnum=""62""/>" & ASCII.LF &
+      "    <reg name=""ft10""  bitsize=""64"" type=""ieee_double"" regnum=""63""/>" & ASCII.LF &
+      "    <reg name=""ft11""  bitsize=""64"" type=""ieee_double"" regnum=""64""/>" & ASCII.LF &
+      "    <reg name=""fflags"" bitsize=""32"" regnum=""65""/>" & ASCII.LF &
+      "    <reg name=""frm""    bitsize=""32"" regnum=""66""/>" & ASCII.LF &
+      "    <reg name=""fcsr""   bitsize=""32"" regnum=""67""/>" & ASCII.LF &
       "  </feature>" & ASCII.LF &
       "</target>" & ASCII.LF;
 
@@ -751,9 +789,14 @@ package body RISCV.GDB is
 
          --  ---- Register read (all) - 33 * 16 hex chars ----
          when 'g' =>
+            --  x0-x31, pc, f0-f31, then fflags/frm/fcsr. The target
+            --  description advertises the FPU feature, so the whole block
+            --  has to be here: RV64 programs are built lp64d and GDB
+            --  refuses a description whose flen does not match the ELF.
             declare
-               Response : String (1 .. 33 * 16);
+               Response : String (1 .. 33 * 16 + 32 * 16 + 3 * 8);
                Pos : Natural := 1;
+               FCSR_Val : constant Word := FPU.Read_FCSR (CPU.FP);
             begin
                for I in 0 .. 31 loop
                   Response (Pos .. Pos + 15) :=
@@ -762,6 +805,21 @@ package body RISCV.GDB is
                end loop;
                Response (Pos .. Pos + 15) :=
                   To_Hex_DWord (Double_Word (CPU.PC));
+               Pos := Pos + 16;
+               for I in 0 .. 31 loop
+                  Response (Pos .. Pos + 15) :=
+                     To_Hex_DWord (Double_Word
+                        (FPU.Read_Double (CPU.FP, Register_Index (I))));
+                  Pos := Pos + 16;
+               end loop;
+               --  fflags = fcsr[4:0], frm = fcsr[7:5]
+               Response (Pos .. Pos + 7) :=
+                  To_Hex_Word (FCSR_Val and 16#1F#);
+               Pos := Pos + 8;
+               Response (Pos .. Pos + 7) :=
+                  To_Hex_Word (Shift_Right (FCSR_Val, 5) and 7);
+               Pos := Pos + 8;
+               Response (Pos .. Pos + 7) := To_Hex_Word (FCSR_Val);
                Send_Packet (Server, Response);
             end;
 
@@ -805,6 +863,20 @@ package body RISCV.GDB is
                elsif Reg = 32 then
                   Send_Packet (Server,
                      To_Hex_DWord (Double_Word (CPU.PC)));
+               elsif Reg in 33 .. 64 then
+                  Send_Packet (Server,
+                     To_Hex_DWord (Double_Word
+                        (FPU.Read_Double (CPU.FP,
+                                          Register_Index (Reg - 33)))));
+               elsif Reg = 65 then
+                  Send_Packet (Server,
+                     To_Hex_Word (FPU.Read_FCSR (CPU.FP) and 16#1F#));
+               elsif Reg = 66 then
+                  Send_Packet (Server,
+                     To_Hex_Word
+                       (Shift_Right (FPU.Read_FCSR (CPU.FP), 5) and 7));
+               elsif Reg = 67 then
+                  Send_Packet (Server, To_Hex_Word (FPU.Read_FCSR (CPU.FP)));
                else
                   Send_Packet (Server, "xxxxxxxxxxxxxxxx");
                end if;
@@ -828,6 +900,12 @@ package body RISCV.GDB is
                         CPU.Registers (Register_Index (Reg)) := Val;
                      elsif Reg = 32 then
                         CPU.PC := Memory_Address_64 (Val);
+                     elsif Reg in 33 .. 64 then
+                        FPU.Write_Double (CPU.FP, Register_Index (Reg - 33),
+                                          FPU.FP_Register (Val));
+                     elsif Reg = 67 then
+                        FPU.Write_FCSR
+                          (CPU.FP, Word (Val and 16#FFFF_FFFF#));
                      end if;
                   end;
                end if;

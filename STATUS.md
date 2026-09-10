@@ -6,7 +6,7 @@
 An Ada-based RISC-V (RV32/RV64) emulator targeting embedded software testing.
 Supports RV32IMAFDC + V + Zbb/Zbs/Zba/Zbkc/Zbkx/A/Zicond/Zfh + RV32E/RV64E and
 RV64IMAFD + Zbb/Zba/A/Zicond ISA, a bare-metal C runtime, 78 algorithm/peripheral
-test programs (2189 assertions all passing), an interactive debugger, a GDB remote
+test programs (2263 assertions all passing), an interactive debugger, a GDB remote
 stub (RV32+RV64, incl. hardware watchpoints with correct T05 watch/rwatch/awatch
 stop reply), an instruction-level profiler with cycle-accurate stall model (MUL/DIV/FP/CSR/
 load-use/branch-taken stalls) and L1 cache simulation (cache stalls reflected in both
@@ -26,7 +26,7 @@ that boots the shareware IWAD and renders the attract demo to PPM frames.
 ```bash
 make                      # build emulator (Ada, src/)
 cd programs && make all   # build all C test programs
-bash programs/test-all.sh # run all 78 tests -- expect 2189 PASS, 0 FAIL
+bash programs/test-all.sh # run all 83 tests -- expect 2263 PASS, 0 FAIL
 ```
 
 ---
@@ -118,7 +118,7 @@ bin/riscv_emulator [flags] <program.bin|.elf> [load_address]
 --ireplay <file>             Replay and verify against binary trace file
 --max-instructions <n>       Stop after N instructions
 --timeout <n>                Halt after N wall-clock seconds
---harts <n>                  Number of harts to simulate (1 or 2, RV32 only)
+--harts <n>                  Number of harts to simulate (1 or 2)
 --log-dir <dir>              Write semihosting log files to <dir> (created if absent)
 --host-io <mode>             Guest access to host files: off, ro, rw (default: rw)
 --host-io-root <dir>         Confine guest host-file paths to <dir> (default: CWD)
@@ -387,7 +387,7 @@ signal for the emulator, in ways the unit tests can't cover on their own:
 
 - **Third-party, optimizer-hardened code.** DOOM was written in 1993 for real hardware and
   compiled here by a stock GCC that assumes a fully correct machine -- it makes no allowances
-  for emulator quirks. The 78 test programs were written *knowing* this emulator; DOOM was not.
+  for emulator quirks. The 83 test programs were written *knowing* this emulator; DOOM was not.
   It's an adversarial, independent workload.
 - **Sustained, long-running execution.** A unit test runs a few thousand instructions and
   stops. DOOM runs *billions* per session. Any rare incorrectness (a sign-extension edge case,
@@ -403,12 +403,12 @@ The scope boundary is deliberate and *not* a soundness gap: there is no emulated
 sound chip, or DOS interrupts -- the guest gets those services through semihosting ECALLs
 instead. The parts that must be correct (the CPU, memory, and the ISA) demonstrably are.
 
-**Bottom line:** "DOOM runs, clean" alongside "2189 assertions across 78 tests" gives both
+**Bottom line:** "DOOM runs, clean" alongside "2263 assertions across 83 tests" gives both
 breadth (deliberate corner cases) and depth (a large real program under sustained load).
 
 ---
 
-## Test Programs -- All 78 Passing (2189 Assertions)
+## Test Programs -- All 83 Passing (2263 Assertions)
 
 | Test | PASS | Subject |
 |------|------|---------|
@@ -473,6 +473,11 @@ breadth (deliberate corner cases) and depth (a large real program under sustaine
 | rv64-atomic-test | 30 | RV64 A: LR.D/SC.D + 10 AMO.D variants (SWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU) |
 | rv64-zba64-test | 29 | RV64 Zba: sh1add/sh2add/sh3add (64-bit) + add.uw/sh1add.uw/sh2add.uw/sh3add.uw |
 | rv64-zicond-test | 16 | Zicond: czero.eqz/czero.nez, cmov pattern (both RV32 and RV64) |
+| rv64-zbs64-test | 24 | RV64 Zbs: bset/bclr/binv/bext (register + immediate), shift amounts across the full 64-bit width |
+| rv64-zbc64-test | 11 | RV64 Zbc/Zbkc: clmul/clmulh/clmulr vs a software carry-less-multiply reference, 12x12 pairs |
+| rv64-zbkx64-test | 10 | RV64 Zbkx: xperm4 (16 nibbles) / xperm8 (8 bytes) vs a reference, incl. out-of-range indices |
+| rv64-zbkb64-test | 13 | RV64 Zbkb: pack/packh/packw (widened halves) + brev8 |
+| rv64-reserved-test | 16 | Reserved-encoding trap coverage: 11 reserved funct7/funct6 encodings must raise illegal-instruction, 5 legal ones must not (guards the decoder against aliasing to a base op) |
 | prtos-test | 21 | Preemptive RTOS: timer interrupt, mret context switch, 4 concurrent tasks |
 | prtos2-test | 25 | Preemptive RTOS extensions: mutex, message queue, priority scheduling, stack canary, task_sleep_until |
 | virtio-blk-test | 29 | VirtIO MMIO block v2: negotiation, write/read/verify sectors, OOB, reset |
@@ -490,7 +495,7 @@ breadth (deliberate corner cases) and depth (a large real program under sustaine
 | pipeline-test | 6 | Pipeline timing: load-use stall (+1), no-stall baseline, taken branch (+1), JAL (+1), NOP throughput |
 | pthread-test | 7 | pthread-lite over `--harts 2`: create/join, mutex, trylock, sequential reuse, void* retval |
 | gzip-test | 8 | RFC 1952 gzip: magic/CM bytes, round-trip, CRC-32 + ISIZE trailer, tamper detection |
-| **TOTAL** | **2189** | |
+| **TOTAL** | **2263** | |
 
 ---
 
@@ -595,6 +600,65 @@ if they are absolute, contain a `..` component, or contain a NUL.
 `--host-io off|ro|rw` sets what is permitted at all; `off` covers the log
 ECALL too. The check is on the name the guest supplies, not on where it
 resolves to, so a symlink inside the root cannot be used to point back out.
+
+## RV32 and RV64
+
+**Scalar bitmanip / crypto reach both cores (2026-09-10).** RV64 now decodes
+Zbs (bset/bclr/binv/bext), Zbc/Zbkc (clmul/clmulh/clmulr), Zbkx
+(xperm4/xperm8) and Zbkb pack/packh/packw/brev8, alongside the Zba/Zbb/Zicond
+it already had.
+
+**Both integer decoders now reject reserved encodings.** They used to fall
+through an unrecognised funct7/funct6 to whichever base op shared the funct3
+-- so on RV64 `bseti` ran as `slli`, `clmul` as a shift, and a wrong value
+came back with no trap. The decode is now an exact funct7/funct6 dispatch;
+anything unimplemented raises illegal-instruction. Verified against objdump
+and by diffing RV32 vs RV64 results for every affected instruction.
+
+### Vector (RVV 1.0): RV32 only, and SEW=32 in practice
+
+`misa` on the RV64 core does **not** advertise V, and a vector instruction on
+RV64 traps illegal -- RVV is not wired to the 64-bit core.
+
+A deeper limitation affects RV32 too: `RISCV.Vector`'s element path
+(`Read_Element` / `Write_Element`) is `Word`-based and sign-extends from bit
+31, so it is only correct at **SEW=32** (and for unsigned ops at smaller SEW).
+Signed ops at SEW=8/16 and everything at SEW=64 compute wrong results. The
+495-assertion vector suite only exercises SEW=32, which is why this was never
+caught. Fixing it means reworking the element model to a 64-bit representation
+across ~280 subprograms, with no local reference oracle (the QEMU here predates
+RVV 1.0). Until then, treat the vector unit as an SEW=32 accelerator.
+
+
+The 32- and 64-bit cores are separate implementations (`riscv-cpu.adb` /
+`riscv-cpu64.adb`, with matching `csr`/`csr64` and `alu`/`alu64` packages).
+Which one runs is taken from the ELF class byte, not a flag: an ELF64 loads
+through `Load_ELF64` and runs on `CPU64`.
+
+Every tool works on both:
+
+| Tool | RV32 | RV64 |
+|---|---|---|
+| Interactive debugger (`-d`) | yes | yes |
+| GDB stub (`--gdb`) | yes | yes, including the FPU registers |
+| Profiler (`--profile`, `--flamegraph`) | yes | yes |
+| Coverage (`--coverage`) | yes | yes |
+| Cache model (`--cache`) | yes | yes |
+| Trace record/replay (`--irecord`/`--ireplay`) | 20-byte records | 32-byte records |
+| Multi-hart (`--harts 2`) | yes | yes |
+| RVV 1.0 vector | yes | - |
+| Sv39 MMU | - | yes |
+
+Two details worth knowing:
+
+- **Trace files are XLEN-specific.** An RV64 record is 32 bytes and carries the
+  full 64-bit PC and destination-register value; truncating to 32 bits would
+  hide a divergence in the upper half. `--ireplay` rejects a 32-bit trace fed
+  to an RV64 run rather than reporting nonsense.
+- **Symbol addresses are held in 32 bits** throughout the debugger, profiler
+  and coverage tracker. `Load_From_ELF` parses ELF64 (whose section headers and
+  `Elf64_Sym` field *order* both differ from ELF32) but skips any symbol that
+  does not fit in 32 bits. Every RV64 program built here links at 0x80000000.
 
 ## Known Gotchas
 

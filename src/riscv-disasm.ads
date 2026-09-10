@@ -25,8 +25,12 @@
 
 package RISCV.Disasm is
 
-   --  Disassemble a single instruction, returning the assembly string
-   function Disassemble (Instruction : Word; PC : Word) return String;
+   --  Disassemble a single instruction, returning the assembly string.
+   --  Xlen64 selects RV64 decoding where the two differ: 6-bit shift
+   --  amounts, the RV64 rev8 encoding, and the OP-IMM-32 / OP-32 W ops.
+   function Disassemble (Instruction : Word;
+                         PC          : Word;
+                         Xlen64      : Boolean := False) return String;
 
    --  Get register name (x0, ra, sp, gp, tp, t0-t6, s0-s11, a0-a7)
    function Reg_Name (Reg : Register_Index) return String;

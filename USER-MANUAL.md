@@ -330,6 +330,14 @@ host file too. Running an untrusted binary is the case to tighten:
 | `--profile` | Enable function call profiling |
 | `--flamegraph [file]` | Enable profiling + export flamegraph data |
 
+Every tool - debugger, GDB stub, profiler, coverage, cache model, trace
+record/replay and `--harts 2` - works on both RV32 and RV64. Which core runs is
+taken from the ELF class byte, so nothing needs to be passed.
+
+Trace files are XLEN-specific: an RV64 record is 32 bytes and holds the full
+64-bit PC and register value, against 20 bytes for RV32. `--ireplay` refuses a
+trace recorded for the other width rather than reporting nonsense.
+
 ### UART Options
 
 | Option | Description |

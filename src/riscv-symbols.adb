@@ -77,6 +77,18 @@ package body RISCV.Symbols is
    end Read_Half;
 
    --  Helper: Skip N bytes
+   --  Read a little-endian 64-bit value (ELF64 fields).
+   procedure Read_DWord (Stream : Ada.Streams.Stream_IO.Stream_Access;
+                         Value  : out Double_Word) is
+      B : Byte;
+   begin
+      Value := 0;
+      for I in 0 .. 7 loop
+         Byte'Read (Stream, B);
+         Value := Value or Shift_Left (Double_Word (B), I * 8);
+      end loop;
+   end Read_DWord;
+
    procedure Skip_Bytes (Stream : Ada.Streams.Stream_IO.Stream_Access; Count : Natural) is
       Dummy : Byte;
    begin
@@ -102,6 +114,8 @@ package body RISCV.Symbols is
       File : Ada.Streams.Stream_IO.File_Type;
       Stream : Ada.Streams.Stream_IO.Stream_Access;
       Magic : Word;
+      Is_64 : Boolean := False;   -- ELFCLASS64: different header, section
+                                  -- header and symbol layouts throughout
       E_Shoff : Word;      -- Section header offset
       E_Shnum : Half_Word;  -- Section header count
       E_Shentsize : Half_Word;
@@ -137,33 +151,70 @@ package body RISCV.Symbols is
          return;
       end if;
 
-      --  ELF32 header layout after magic (4 bytes already read):
-      --  12 bytes: rest of e_ident
-      --  2 bytes: e_type
-      --  2 bytes: e_machine
-      --  4 bytes: e_version
-      --  4 bytes: e_entry
-      --  4 bytes: e_phoff
-      --  4 bytes: e_shoff (we want this, at offset 32 from file start)
-      --  Total: skip 28 bytes after magic to get e_shoff
-      Skip_Bytes (Stream, 28);
-      Read_Word (Stream, E_Shoff);
+      --  e_ident[4] is EI_CLASS: 1 = ELF32, 2 = ELF64. Every offset below
+      --  depends on it, so read it before anything else.
+      declare
+         Class_Byte : Byte;
+      begin
+         Byte'Read (Stream, Class_Byte);
+         Is_64 := Class_Byte = 2;
+      end;
 
-      --  After e_shoff:
-      --  4 bytes: e_flags
-      --  2 bytes: e_ehsize
-      --  2 bytes: e_phentsize
-      --  2 bytes: e_phnum
-      --  2 bytes: e_shentsize (we want this)
-      --  2 bytes: e_shnum (we want this)
-      --  2 bytes: e_shstrndx (we want this)
-      --  Total: skip 4 bytes to get to e_ehsize, then skip 6 more
-      Skip_Bytes (Stream, 4);  -- e_flags
-      Skip_Bytes (Stream, 2);  -- e_ehsize
-      Skip_Bytes (Stream, 4);  -- e_phentsize + e_phnum
-      Read_Half (Stream, E_Shentsize);
-      Read_Half (Stream, E_Shnum);
-      Read_Half (Stream, E_Shstrndx);
+      if Is_64 then
+         --  ELF64 header after e_ident[4] (5 bytes of the file read so far):
+         --  11 bytes: rest of e_ident
+         --   2 bytes: e_type
+         --   2 bytes: e_machine
+         --   4 bytes: e_version
+         --   8 bytes: e_entry
+         --   8 bytes: e_phoff
+         --   8 bytes: e_shoff  (at file offset 0x28)
+         Skip_Bytes (Stream, 11 + 2 + 2 + 4 + 8 + 8);
+         declare
+            Shoff64 : Double_Word;
+         begin
+            Read_DWord (Stream, Shoff64);
+            --  Section headers beyond 4 GB would need a 64-bit Set_Index
+            --  path; no toolchain produces that for these programs.
+            if Shoff64 > Double_Word (Word'Last) then
+               Ada.Streams.Stream_IO.Close (File);
+               return;
+            end if;
+            E_Shoff := Word (Shoff64);
+         end;
+         Skip_Bytes (Stream, 4);  -- e_flags
+         Skip_Bytes (Stream, 2);  -- e_ehsize
+         Skip_Bytes (Stream, 4);  -- e_phentsize + e_phnum
+         Read_Half (Stream, E_Shentsize);
+         Read_Half (Stream, E_Shnum);
+         Read_Half (Stream, E_Shstrndx);
+      else
+         --  ELF32 header layout after e_ident[4] (5 bytes read):
+         --  11 bytes: rest of e_ident
+         --   2 bytes: e_type
+         --   2 bytes: e_machine
+         --   4 bytes: e_version
+         --   4 bytes: e_entry
+         --   4 bytes: e_phoff
+         --   4 bytes: e_shoff (at file offset 32)
+         Skip_Bytes (Stream, 27);
+         Read_Word (Stream, E_Shoff);
+
+         --  After e_shoff:
+         --  4 bytes: e_flags
+         --  2 bytes: e_ehsize
+         --  2 bytes: e_phentsize
+         --  2 bytes: e_phnum
+         --  2 bytes: e_shentsize (we want this)
+         --  2 bytes: e_shnum (we want this)
+         --  2 bytes: e_shstrndx (we want this)
+         Skip_Bytes (Stream, 4);  -- e_flags
+         Skip_Bytes (Stream, 2);  -- e_ehsize
+         Skip_Bytes (Stream, 4);  -- e_phentsize + e_phnum
+         Read_Half (Stream, E_Shentsize);
+         Read_Half (Stream, E_Shnum);
+         Read_Half (Stream, E_Shstrndx);
+      end if;
 
       --  Find .symtab and .strtab sections
       for I in 0 .. Natural (E_Shnum) - 1 loop
@@ -175,17 +226,36 @@ package body RISCV.Symbols is
             Sh_Size : Word;
             Sh_Link : Word;
             Sh_Entsize : Word;
+            Tmp64 : Double_Word;
          begin
-            Skip_Bytes (Stream, 4);  -- sh_name
-            Read_Word (Stream, Sh_Type);
-            Skip_Bytes (Stream, 4);  -- sh_flags
-            Skip_Bytes (Stream, 4);  -- sh_addr
-            Read_Word (Stream, Sh_Offset);
-            Read_Word (Stream, Sh_Size);
-            Read_Word (Stream, Sh_Link);
-            Skip_Bytes (Stream, 4);  -- sh_info
-            Skip_Bytes (Stream, 4);  -- sh_addralign
-            Read_Word (Stream, Sh_Entsize);
+            if Is_64 then
+               --  Elf64_Shdr: name(4) type(4) flags(8) addr(8) offset(8)
+               --  size(8) link(4) info(4) addralign(8) entsize(8)
+               Skip_Bytes (Stream, 4);  -- sh_name
+               Read_Word (Stream, Sh_Type);
+               Skip_Bytes (Stream, 8);  -- sh_flags
+               Skip_Bytes (Stream, 8);  -- sh_addr
+               Read_DWord (Stream, Tmp64);
+               Sh_Offset := Word (Tmp64 and 16#FFFF_FFFF#);
+               Read_DWord (Stream, Tmp64);
+               Sh_Size := Word (Tmp64 and 16#FFFF_FFFF#);
+               Read_Word (Stream, Sh_Link);
+               Skip_Bytes (Stream, 4);  -- sh_info
+               Skip_Bytes (Stream, 8);  -- sh_addralign
+               Read_DWord (Stream, Tmp64);
+               Sh_Entsize := Word (Tmp64 and 16#FFFF_FFFF#);
+            else
+               Skip_Bytes (Stream, 4);  -- sh_name
+               Read_Word (Stream, Sh_Type);
+               Skip_Bytes (Stream, 4);  -- sh_flags
+               Skip_Bytes (Stream, 4);  -- sh_addr
+               Read_Word (Stream, Sh_Offset);
+               Read_Word (Stream, Sh_Size);
+               Read_Word (Stream, Sh_Link);
+               Skip_Bytes (Stream, 4);  -- sh_info
+               Skip_Bytes (Stream, 4);  -- sh_addralign
+               Read_Word (Stream, Sh_Entsize);
+            end if;
 
             if Sh_Type = SHT_SYMTAB then
                Symtab_Offset := Sh_Offset;
@@ -229,20 +299,48 @@ package body RISCV.Symbols is
                St_Info : Byte;
                St_Other : Byte;
                St_Shndx : Half_Word;
+               Value64 : Double_Word := 0;
+               Fits    : Boolean := True;
 
                Sym_TypeVal : Natural;
             begin
-               Read_Word (Stream, St_Name);
-               Read_Word (Stream, St_Value);
-               Read_Word (Stream, St_Size);
-               Byte'Read (Stream, St_Info);
-               Byte'Read (Stream, St_Other);
-               Read_Half (Stream, St_Shndx);
+               if Is_64 then
+                  --  Elf64_Sym reorders the fields relative to Elf32_Sym:
+                  --  name(4) info(1) other(1) shndx(2) value(8) size(8),
+                  --  where Elf32_Sym is name value size info other shndx.
+                  declare
+                     Size64 : Double_Word;
+                  begin
+                     Read_Word (Stream, St_Name);
+                     Byte'Read (Stream, St_Info);
+                     Byte'Read (Stream, St_Other);
+                     Read_Half (Stream, St_Shndx);
+                     Read_DWord (Stream, Value64);
+                     Read_DWord (Stream, Size64);
+                     St_Size := Word (Size64 and 16#FFFF_FFFF#);
+                  end;
+                  --  Symbol addresses are held in 32 bits throughout the
+                  --  debugger, profiler and coverage tracker. Every RV64
+                  --  program built here links below 4 GB; one that did not
+                  --  could not be looked up anyway, so skip it rather than
+                  --  record a wrong address.
+                  Fits := Value64 <= Double_Word (Word'Last);
+                  St_Value := Word (Value64 and 16#FFFF_FFFF#);
+               else
+                  Read_Word (Stream, St_Name);
+                  Read_Word (Stream, St_Value);
+                  Read_Word (Stream, St_Size);
+                  Byte'Read (Stream, St_Info);
+                  Byte'Read (Stream, St_Other);
+                  Read_Half (Stream, St_Shndx);
+               end if;
 
                Sym_TypeVal := Natural (St_Info) mod 16;
 
                --  Only store named, defined symbols
-               if St_Name > 0 and St_Shndx /= 0 and St_Value /= 0 then
+               if Fits and then
+                  (St_Name > 0 and St_Shndx /= 0 and St_Value /= 0)
+               then
                   Syms.Count := Syms.Count + 1;
 
                   Syms.Symbols (Syms.Count).Valid := True;

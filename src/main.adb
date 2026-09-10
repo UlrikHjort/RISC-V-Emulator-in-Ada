@@ -120,6 +120,7 @@ procedure Main is
    ICache_Ways   : constant Positive := 4;
    DCache_Ways   : constant Positive := 4;
    Proc2         : CPU.CPU_State;
+   Proc64_2      : CPU64.CPU64_State;
 
    use type Config.Peripheral_Type;
    use type Memory.UART_Access;
@@ -144,7 +145,7 @@ procedure Main is
       Put_Line ("  --trace-regs          Show register changes in trace");
       Put_Line ("  --max-instructions <n> Stop after n instructions (prevents infinite loops)");
       Put_Line ("  --timeout <n>        Halt after n wall-clock seconds");
-      Put_Line ("  --harts <n>          Number of harts to simulate (1 or 2, RV32 only)");
+      Put_Line ("  --harts <n>          Number of harts to simulate (1 or 2)");
       Put_Line ("  --rv32e               Enable RV32E (16-register subset, sets MISA.E)");
       Put_Line ("  --rv64e               Enable RV64E (16-register subset for RV64, sets MISA.E)");
       Put_Line ("  --cache               Enable L1 I+D cache simulation (16KB 4-way each)");
@@ -845,8 +846,13 @@ begin
       end;
    end if;
 
-   --  Multi-hart initialisation (RV32 only)
-   if Harts = 2 and not Is_RV64 then
+   --  Multi-hart initialisation
+   if Harts = 2 and Is_RV64 then
+      CPU64.Initialize (Proc64_2, Double_Word (Proc64.PC));
+      Proc64_2.Hart_ID := 1;
+      CSR64.Write (Proc64_2.CSRs, CSR64.CSR_MHARTID, 1);
+      Proc64_2.Rv32e := Proc64.Rv32e;
+   elsif Harts = 2 then
       CPU.Initialize (Proc2, Processor.PC);
       Proc2.Hart_ID := 1;
       CSR.Write (Proc2.CSRs, CSR.CSR_MHARTID, 1);
@@ -898,17 +904,60 @@ begin
    end if;
 
    if GDB_Mode and Is_RV64 then
-      --  GDB not yet adapted for RV64; fall back to plain run
-      if not Quiet then
-         Put_Line ("Note: GDB mode not yet supported for RV64; running normally.");
-      end if;
-      CPU64.Run (Proc64, Mem, Trace,
-                 (Enabled => Trace,
-                  PC_Start => Memory_Address_64 (Trace_Start),
-                  PC_End   => Memory_Address_64 (Trace_End),
-                  Show_Memory => Trace_Mem,
-                  Show_Regs   => Trace_Regs),
-                 Max_Insns);
+      --  GDB Remote Debugging Mode (RV64)
+      declare
+         Server : GDB.GDB_Server;
+         Should_Run : Boolean;
+         Should_Step : Boolean;
+      begin
+         GDB.Initialize (Server, GDB_Port, GDB_All_Ifaces);
+
+         --  Track all memory accesses so watchpoints can fire
+         Mem.Track_Access := True;
+
+         if GDB.Accept_Connection (Server) then
+            Put_Line ("GDB connected. Waiting for commands...");
+
+            loop
+               GDB.Process_Commands (Server, Proc64, Mem,
+                                     Should_Run, Should_Step);
+
+               if Should_Run then
+                  declare
+                     Hit_Watchpoint : Boolean := False;
+                  begin
+                     loop
+                        CPU64.Step (Proc64, Mem);
+                        exit when Proc64.Halted;
+                        exit when GDB.Is_Breakpoint
+                                    (Server, Double_Word (Proc64.PC));
+                        if GDB.Is_Watchpoint_Hit (Server,
+                              Double_Word (Mem.Last_Access_Addr),
+                              Mem.Last_Access_Write)
+                        then
+                           Hit_Watchpoint := True;
+                           exit;
+                        end if;
+                     end loop;
+                     if Hit_Watchpoint then
+                        GDB.Send_Watchpoint_Stop (Server, Proc64,
+                           Double_Word (Mem.Last_Access_Addr),
+                           Mem.Last_Access_Write);
+                     else
+                        GDB.Send_Stop_Reply (Server, Proc64);
+                     end if;
+                  end;
+               elsif Should_Step then
+                  CPU64.Step (Proc64, Mem);
+                  GDB.Send_Stop_Reply (Server, Proc64);
+               end if;
+
+               exit when not GDB.Is_Connected (Server);
+            end loop;
+
+            GDB.Close (Server);
+         end if;
+      end;
 
    elsif GDB_Mode then
       --  GDB Remote Debugging Mode
@@ -967,17 +1016,13 @@ begin
       end;
 
    elsif Debug and Is_RV64 then
-      --  Interactive debugger not yet adapted for RV64; fall back to plain run
-      if not Quiet then
-         Put_Line ("Note: Interactive debugger not yet supported for RV64; running normally.");
+      --  Interactive debugger (RV64)
+      if Is_ELF_File and Program_File_Len > 0 then
+         Debugger.Load_Symbols (Dbg, Program_File (1 .. Program_File_Len));
       end if;
-      CPU64.Run (Proc64, Mem, Trace,
-                 (Enabled => Trace,
-                  PC_Start => Memory_Address_64 (Trace_Start),
-                  PC_End   => Memory_Address_64 (Trace_End),
-                  Show_Memory => Trace_Mem,
-                  Show_Regs   => Trace_Regs),
-                 Max_Insns);
+
+      Put_Line ("");
+      Debugger.Run (Dbg, Proc64, Mem);
 
    elsif Debug then
       --  Load symbols for debugging if we have an ELF file
@@ -1037,14 +1082,347 @@ begin
          end if;
 
          --  Run with profiling / coverage / or plain execution
-         if Is_RV64 then
-            --  RV64: profile/coverage/trace modes not yet supported; run plainly
-            if Profile_Mode or Coverage_Mode or IRecord_Mode or IReplay_Mode then
-               if not Quiet then
-                  Put_Line ("Note: profiling/coverage/trace not yet supported for RV64.");
+         if Is_RV64 and Profile_Mode then
+            --  Profiling mode, RV64. Mirrors the RV32 loop below; the
+            --  profiler, coverage tracker and symbol table all key on the
+            --  low 32 bits of the PC, which is where these programs link.
+            declare
+               type Profiler_Ptr is access all Profiler.Profiler_State;
+               type Cache_Ptr    is access all Cache.Cache_State;
+               Prof        : Profiler_Ptr;
+               Syms        : Profiler.Symbol_Table_Ptr;
+               Cov         : Coverage.Coverage_State_Ptr;
+               IC          : Cache_Ptr := null;
+               DC          : Cache_Ptr := null;
+               Cycle_Count : Natural := 0;
+               Instruction : Word;
+               PC_Before   : Memory_Address_64;
+            begin
+               Syms := new Symbols.Symbol_Table;
+               Symbols.Init (Syms.all);
+               if Is_ELF_File and Program_File_Len > 0 then
+                  declare
+                     Success : Boolean;
+                  begin
+                     Symbols.Load_From_ELF
+                       (Syms.all, Program_File (1 .. Program_File_Len),
+                        Success);
+                  end;
                end if;
+
+               Prof := new Profiler.Profiler_State;
+               Profiler.Initialize (Prof.all, Syms);
+
+               if Coverage_Mode then
+                  Cov := new Coverage.Coverage_State;
+                  Coverage.Initialize (Cov.all);
+               end if;
+
+               if Cache_Mode then
+                  IC := new Cache.Cache_State;
+                  DC := new Cache.Cache_State;
+                  Cache.Initialize (IC.all, ICache_KB, ICache_Ways);
+                  Cache.Initialize (DC.all, DCache_KB, DCache_Ways);
+                  Mem.Track_Access := True;
+               end if;
+
+               declare
+                  Start_Time : constant Time := Clock;
+               begin
+                  while not Proc64.Halted and Cycle_Count < Max_Insns loop
+                     PC_Before   := Proc64.PC;
+                     Instruction :=
+                        Memory.Read_Word (Mem, Memory_Address (PC_Before));
+                     Mem.Last_Access_Valid := False;
+                     if Coverage_Mode then
+                        Coverage.Record_PC (Cov.all, PC_Before);
+                     end if;
+                     CPU64.Step (Proc64, Mem, Trace, Cfg64);
+                     Profiler.Record_Instruction
+                       (Prof.all, PC_Before, Instruction);
+                     if Cache_Mode then
+                        declare
+                           I_St  : constant Natural := Cache.Access_Cache
+                              (IC.all, Memory_Address (PC_Before));
+                           I_Hit : constant Boolean := I_St = 0;
+                           D_St  : Natural  := 0;
+                           D_Hit : Boolean  := True;
+                        begin
+                           if Mem.Last_Access_Valid then
+                              D_St  := Cache.Access_Cache
+                                 (DC.all, Mem.Last_Access_Addr);
+                              D_Hit := D_St = 0;
+                           end if;
+                           Profiler.Record_Cache_Stalls (Prof.all,
+                              I_St, I_Hit, D_St, D_Hit,
+                              Mem.Last_Access_Valid);
+                           CPU64.Add_Cycle_Stalls (Proc64, I_St + D_St);
+                        end;
+                     end if;
+                     Cycle_Count := Cycle_Count + 1;
+                     if Timeout_Secs > 0 and then
+                        (Cycle_Count mod 100_000) = 0 and then
+                        Clock - Start_Time >= Duration (Timeout_Secs)
+                     then
+                        Ada.Text_IO.Put_Line
+                          (Ada.Text_IO.Standard_Error,
+                           "TIMEOUT: program exceeded" &
+                           Natural'Image (Timeout_Secs) & " second(s)");
+                        Proc64.Halted := True;
+                        exit;
+                     end if;
+                  end loop;
+               end;
+
+               Profiler.Print_Report (Prof.all);
+               Profiler.Print_Call_Graph (Prof.all);
+
+               if Flamegraph_Len > 0 then
+                  Profiler.Export_Flamegraph
+                    (Prof.all, Flamegraph_File (1 .. Flamegraph_Len));
+               end if;
+
+               if Cache_Mode then
+                  Put_Line ("");
+                  Put_Line ("=== Cache Statistics ===");
+                  Cache.Print_Stats (IC.all, "I-cache");
+                  Cache.Print_Stats (DC.all, "D-cache");
+               end if;
+
+               if Coverage_Mode then
+                  Coverage.Dump_Report
+                    (Cov.all,
+                     Coverage_File (1 .. Coverage_File_Len),
+                     Syms);
+                  if not Quiet then
+                     Put_Line ("Coverage report written to " &
+                               Coverage_File (1 .. Coverage_File_Len));
+                  end if;
+               end if;
+            end;
+
+         elsif Is_RV64 and Coverage_Mode then
+            --  Coverage-only mode, RV64
+            declare
+               type Cov_Ptr is access all Coverage.Coverage_State;
+               Cov         : constant Cov_Ptr := new Coverage.Coverage_State;
+               St          : aliased Symbols.Symbol_Table;
+               Cycle_Count : Natural := 0;
+               Sym_Loaded  : Boolean := False;
+               Cov_Start   : constant Time := Clock;
+            begin
+               Coverage.Initialize (Cov.all);
+               Symbols.Init (St);
+
+               if Is_ELF_File and Program_File_Len > 0 then
+                  Symbols.Load_From_ELF
+                    (St, Program_File (1 .. Program_File_Len), Sym_Loaded);
+               end if;
+
+               while not Proc64.Halted and Cycle_Count < Max_Insns loop
+                  Coverage.Record_PC (Cov.all, Proc64.PC);
+                  CPU64.Step (Proc64, Mem, Trace, Cfg64);
+                  Cycle_Count := Cycle_Count + 1;
+                  if Timeout_Secs > 0 and then
+                     (Cycle_Count mod 100_000) = 0 and then
+                     Clock - Cov_Start >= Duration (Timeout_Secs)
+                  then
+                     Ada.Text_IO.Put_Line
+                       (Ada.Text_IO.Standard_Error,
+                        "TIMEOUT: program exceeded" &
+                        Natural'Image (Timeout_Secs) & " second(s)");
+                     Proc64.Halted := True;
+                     exit;
+                  end if;
+               end loop;
+
+               Coverage.Dump_Report
+                 (Cov.all,
+                  Coverage_File (1 .. Coverage_File_Len),
+                  (if Sym_Loaded then St'Access else null));
+
+               if not Quiet then
+                  Put_Line ("Coverage report written to " &
+                            Coverage_File (1 .. Coverage_File_Len));
+               end if;
+            end;
+
+         elsif Is_RV64 and IRecord_Mode then
+            --  Instruction trace recording, RV64 (32-byte records)
+            declare
+               Rec_State    : Trace_Replay.Recorder_State_64;
+               Cycle_Count  : Natural := 0;
+               Encoding     : Word;
+               Rd_Idx       : Word;
+               Rd_Val_After : Double_Word;
+               PC_Before    : Memory_Address_64;
+               Rec_Start    : constant Time := Clock;
+            begin
+               Trace_Replay.Open_For_Recording_64
+                 (Rec_State, IRecord_File (1 .. IRecord_File_Len));
+
+               while not Proc64.Halted and Cycle_Count < Max_Insns loop
+                  PC_Before := Proc64.PC;
+                  Encoding  :=
+                     Memory.Read_Word (Mem, Memory_Address (PC_Before));
+                  Rd_Idx    := Shift_Right (Encoding, 7) and 16#1F#;
+
+                  CPU64.Step (Proc64, Mem, Trace, Cfg64);
+                  Cycle_Count := Cycle_Count + 1;
+
+                  Rd_Val_After :=
+                     Proc64.Registers (Register_Index (Rd_Idx));
+
+                  Trace_Replay.Append_64
+                    (Rec_State,
+                     PC       => Double_Word (PC_Before),
+                     Encoding => Encoding,
+                     Rd       => Rd_Idx,
+                     Rd_Value => Rd_Val_After,
+                     Next_PC  => Double_Word (Proc64.PC));
+
+                  if Timeout_Secs > 0 and then
+                     (Cycle_Count mod 100_000) = 0 and then
+                     Clock - Rec_Start >= Duration (Timeout_Secs)
+                  then
+                     Ada.Text_IO.Put_Line
+                       (Ada.Text_IO.Standard_Error,
+                        "TIMEOUT: program exceeded" &
+                        Natural'Image (Timeout_Secs) & " second(s)");
+                     Proc64.Halted := True;
+                     exit;
+                  end if;
+               end loop;
+
+               Trace_Replay.Close_Recorder_64 (Rec_State);
+
+               if not Quiet then
+                  Put_Line ("Instruction trace written to " &
+                            IRecord_File (1 .. IRecord_File_Len) &
+                            " (" &
+                            Long_Long_Integer'Image (Rec_State.Count) &
+                            " records)");
+               end if;
+            end;
+
+         elsif Is_RV64 and IReplay_Mode then
+            --  Instruction trace replay / verification, RV64
+            declare
+               use Trace_Replay;
+               Rep_State    : Replayer_State_64;
+               Cycle_Count  : Natural := 0;
+               Encoding     : Word;
+               Rd_Idx       : Word;
+               Rd_Val_After : Double_Word;
+               PC_Before    : Memory_Address_64;
+               Res          : Replay_Result;
+               Msg          : String (1 .. 512);
+               Msg_Len      : Natural;
+               Rep_Start    : constant Time := Clock;
+            begin
+               Open_For_Replay_64
+                 (Rep_State, IReplay_File (1 .. IReplay_File_Len));
+
+               if Rep_State.Bad_Format then
+                  Put_Line ("Error: " &
+                            IReplay_File (1 .. IReplay_File_Len) &
+                            " is not an RV64 trace (RV64 records are 32 " &
+                            "bytes; RV32 traces use 20).");
+               else
+                  while not Proc64.Halted and Cycle_Count < Max_Insns loop
+                     PC_Before := Proc64.PC;
+                     Encoding  :=
+                        Memory.Read_Word (Mem, Memory_Address (PC_Before));
+                     Rd_Idx    := Shift_Right (Encoding, 7) and 16#1F#;
+
+                     CPU64.Step (Proc64, Mem, Trace, Cfg64);
+                     Cycle_Count := Cycle_Count + 1;
+
+                     Rd_Val_After :=
+                        Proc64.Registers (Register_Index (Rd_Idx));
+
+                     Check_Step_64
+                       (State           => Rep_State,
+                        Actual_PC       => Double_Word (PC_Before),
+                        Actual_Next_PC  => Double_Word (Proc64.PC),
+                        Actual_Rd       => Rd_Idx,
+                        Actual_Rd_Value => Rd_Val_After,
+                        Result          => Res,
+                        Mismatch_Msg    => Msg,
+                        Msg_Len         => Msg_Len);
+
+                     if Res = Mismatch then
+                        Put_Line (Msg (1 .. Msg_Len));
+                        exit;
+                     elsif Res = End_Of_Trace or Res = Replay_Error then
+                        exit;
+                     end if;
+
+                     if Timeout_Secs > 0 and then
+                        (Cycle_Count mod 100_000) = 0 and then
+                        Clock - Rep_Start >= Duration (Timeout_Secs)
+                     then
+                        Ada.Text_IO.Put_Line
+                          (Ada.Text_IO.Standard_Error,
+                           "TIMEOUT: program exceeded" &
+                           Natural'Image (Timeout_Secs) & " second(s)");
+                        Proc64.Halted := True;
+                        exit;
+                     end if;
+                  end loop;
+
+                  Close_Replayer_64 (Rep_State);
+
+                  if not Quiet then
+                     if Rep_State.Mismatches = 0 then
+                        Put_Line ("Replay OK -" &
+                                  Long_Long_Integer'Image
+                                     (Rep_State.Step_Count) &
+                                  " steps matched.");
+                     else
+                        Put_Line ("Replay FAILED -" &
+                                  Long_Long_Integer'Image
+                                     (Rep_State.Mismatches) &
+                                  " mismatch(es).");
+                     end if;
+                  end if;
+               end if;
+            end;
+
+         elsif Is_RV64 then
+            --  Plain RV64 execution, optionally two harts
+            if Harts = 2 then
+               declare
+                  Cycle_Count : Natural := 0;
+                  MH_Start    : constant Time := Clock;
+               begin
+                  while (not Proc64.Halted or not Proc64_2.Halted)
+                        and Cycle_Count < Max_Insns
+                  loop
+                     if not Proc64.Halted then
+                        CPU64.Step (Proc64, Mem, Trace, Cfg64);
+                     end if;
+                     if not Proc64_2.Halted then
+                        CPU64.Step (Proc64_2, Mem, Trace, Cfg64);
+                     end if;
+                     Cycle_Count := Cycle_Count + 1;
+                     if Timeout_Secs > 0 and then
+                        (Cycle_Count mod 100_000) = 0 and then
+                        Clock - MH_Start >= Duration (Timeout_Secs)
+                     then
+                        Ada.Text_IO.Put_Line
+                          (Ada.Text_IO.Standard_Error,
+                           "TIMEOUT: program exceeded" &
+                           Natural'Image (Timeout_Secs) & " second(s)");
+                        Proc64.Halted   := True;
+                        Proc64_2.Halted := True;
+                        exit;
+                     end if;
+                  end loop;
+               end;
+            else
+               CPU64.Run (Proc64, Mem, Trace, Cfg64, Max_Insns);
             end if;
-            CPU64.Run (Proc64, Mem, Trace, Cfg64, Max_Insns);
 
          elsif Profile_Mode then
             --  Profiling mode - record each instruction

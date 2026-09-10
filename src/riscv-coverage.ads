@@ -56,6 +56,13 @@ package RISCV.Coverage is
    procedure Record_PC (State : in out Coverage_State;
                         PC    : Memory_Address);
 
+   --  RV64 variant. The PC is truncated to its low 32 bits, matching the
+   --  symbol table and the profiler's hot-PC table; every RV64 program built
+   --  here links below 4 GB. A PC that does not fit is ignored rather than
+   --  aliased onto an unrelated slot.
+   procedure Record_PC (State : in out Coverage_State;
+                        PC    : Memory_Address_64);
+
    --  Write coverage report to File.
    --  Syms may be null; if non-null and loaded, per-function stats are shown.
    procedure Dump_Report

@@ -43,6 +43,8 @@ package RISCV.Crypto is
    --  Zbkc: Carry-less multiplication
    function CLMUL (Rs1, Rs2 : Word) return Word;
    function CLMULH (Rs1, Rs2 : Word) return Word;
+   --  Zbc clmulr: bits [62:31] of the 64-bit carry-less product.
+   function CLMULR (Rs1, Rs2 : Word) return Word;
 
    --  Zbkx: Crossbar permutation
    function XPERM4 (Rs1, Rs2 : Word) return Word;
@@ -122,5 +124,30 @@ package RISCV.Crypto is
    function ZBB_MAX64  (Rs1, Rs2 : Double_Word) return Double_Word;
    function ZBB_MINU64 (Rs1, Rs2 : Double_Word) return Double_Word;
    function ZBB_MAXU64 (Rs1, Rs2 : Double_Word) return Double_Word;
+
+   --  Zbs, 64-bit forms. The shift amount is the low 6 bits of Rs2 on RV64,
+   --  against the low 5 on RV32.
+   function BSET64 (Rs1, Rs2 : Double_Word) return Double_Word;
+   function BCLR64 (Rs1, Rs2 : Double_Word) return Double_Word;
+   function BINV64 (Rs1, Rs2 : Double_Word) return Double_Word;
+   function BEXT64 (Rs1, Rs2 : Double_Word) return Double_Word;
+
+   --  Zbc / Zbkc, 64-bit forms.
+   function CLMUL64  (Rs1, Rs2 : Double_Word) return Double_Word;
+   function CLMULH64 (Rs1, Rs2 : Double_Word) return Double_Word;
+   function CLMULR64 (Rs1, Rs2 : Double_Word) return Double_Word;
+
+   --  Zbkx, 64-bit forms: 16 nibbles / 8 bytes instead of 8 / 4.
+   function XPERM4_64 (Rs1, Rs2 : Double_Word) return Double_Word;
+   function XPERM8_64 (Rs1, Rs2 : Double_Word) return Double_Word;
+
+   --  Zbkb, 64-bit forms. PACK64 packs the low 32-bit halves (on RV32 it is
+   --  the low 16-bit halves), PACKW is the RV64-only OP-32 form: the low
+   --  16-bit halves, sign-extended from bit 31. ZEXT.H on RV64 is PACKW
+   --  with rs2 = x0.
+   function PACK64   (Rs1, Rs2 : Double_Word) return Double_Word;
+   function PACKH64  (Rs1, Rs2 : Double_Word) return Double_Word;
+   function PACKW    (Rs1, Rs2 : Double_Word) return Double_Word;
+   function BREV8_64 (Rs1 : Double_Word) return Double_Word;
 
 end RISCV.Crypto;

@@ -7,14 +7,14 @@ a cycle-stall timing model.
 
 | | |
 |---|---|
-| **32-bit ISA** | RV32IMAFDC + RVV 1.0 + Zbb/Zbs/Zba + Zbkc/Zbkx + Zicsr + Zicond + Zfh |
-| **64-bit ISA** | RV64IMAFD + Zbb/Zba/A/Zicond - selected automatically from the ELF header |
+| **32-bit ISA** | RV32IMAFDC + RVV 1.0 (SEW=32) + Zbb/Zbs/Zba + Zbkc/Zbkx + Zicsr + Zicond + Zfh |
+| **64-bit ISA** | RV64IMAFDC + Zba/Zbb/Zbs/Zbc + Zbkb/Zbkc/Zbkx + Zicond - selected automatically from the ELF header |
 | **Embedded subsets** | RV32E and RV64E, 16 registers, opt-in via `--rv32e` / `--rv64e` |
 | **Privilege** | M, S and U modes, Sv39 MMU, PLIC, CLINT, SBI shim, multi-hart (`--harts N`) |
 | **Peripherals** | UART 16550 (PTY-backed), GPIO, SPI + 64KB flash, I2C, timer, watchdog, DMA, VirtIO MMIO block |
 | **Timing model** | Load-use and branch-taken stalls, L1 I+D cache simulation - miss penalties visible in `mcycle` |
-| **Tooling** | Interactive debugger, GDB stub with hardware watchpoints, profiler with flamegraph export, coverage, binary trace/replay |
-| **Tests** | 78 programs, 2189 assertions - all passing |
+| **Tooling** | Interactive debugger, GDB stub with hardware watchpoints, profiler with flamegraph export, coverage, binary trace/replay - all on both RV32 and RV64 |
+| **Tests** | 83 programs, 2263 assertions - all passing |
 
 A semihosting host file-I/O interface (ECALLs `0x505`-`0x50C`) lets guest
 programs read and write real files, which is complete enough to run a
@@ -55,7 +55,8 @@ the emulator useful for finding wild pointers and stack overflows.
 - **F Extension** - single-precision FP (32 registers, arithmetic, min/max, compare, convert, FMA, FMV, FCLASS, FLD/FSD)
 - **D Extension** - double-precision FP (same operations as F for 64-bit doubles)
 - **C Extension** - 16-bit compressed instructions (RVC 1.0, ~40% code size reduction)
-- **V Extension** - RVV 1.0 vector (32 registers, VLEN=128; integer/FP arithmetic, reductions, masks, gather/scatter, strided load/store)
+- **V Extension** - RVV 1.0 vector (32 registers, VLEN=128; integer/FP arithmetic, reductions, masks, gather/scatter, strided load/store).
+  Element width **SEW=32 is fully supported**; signed operations at SEW=8/16 and all SEW=64 operations are not yet correct (RV32 core only). See [STATUS.md](STATUS.md#vector-rvv-10-rv32-only-and-sew32-in-practice).
 - **Zbb/Zbs/Zba** - bit-manipulation (count leading/trailing zeros, popcount, byte/bit set/clear, address generation)
 - **Zbkc/Zbkx** - carry-less multiply (CLMUL, CLMULH, CLMULR) for crypto applications
 - **Zicsr** - CSR instructions (CSRRW, CSRRS, CSRRC + immediate variants)
@@ -401,14 +402,14 @@ The emulator includes comprehensive testing infrastructure. See **[TESTING.md](T
 
 ### Automated Tests
 
-Run all 78 automated tests:
+Run all 83 automated tests:
 
 ```bash
 cd programs
 ./test-all.sh
 ```
 
-Expected: **2189 PASS, 0 FAIL**.  Use `./test-all.sh --rebuild` to recompile first.
+Expected: **2263 PASS, 0 FAIL**.  Use `./test-all.sh --rebuild` to recompile first.
 
 | Group | Programs |
 |-------|----------|
@@ -463,7 +464,7 @@ and how to check that yours can target RV32.
 - [x] M extension (multiply/divide)
 - [x] F extension (single-precision float)
 - [x] D extension (double-precision float)
-- [x] V extension (vector, RVV 1.0)
+- [x] V extension (vector, RVV 1.0) - SEW=32 (see STATUS.md for the SEW=8/16/64 limitation)
 - [x] Compressed (C) extension support
 
 **Peripherals:**
@@ -492,7 +493,7 @@ and how to check that yours can target RV32.
 - [x] Performance profiling (per-function, call graphs)
 - [x] Flamegraph export for visual analysis
 - [x] Enhanced instruction tracing (memory, registers, PC filtering)
-- [x] Comprehensive test suite (78 test programs, 2189 assertions)
+- [x] Comprehensive test suite (83 test programs, 2263 assertions)
 
 **Debugging & Development (continued):**
 - [x] Virtual memory / MMU (Sv39) - 3-level page table, 64-entry TLB, page faults

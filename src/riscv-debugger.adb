@@ -61,7 +61,8 @@ package body RISCV.Debugger is
    procedure Disassemble_Memory (Dbg     : Debugger_State;
                                  Mem     : in out Memory.Memory_Unit;
                                  Address : Word;
-                                 Count   : Positive);
+                                 Count   : Positive;
+                                 Xlen64  : Boolean := False);
    procedure Print_Help;
 
    ----------------
@@ -294,7 +295,7 @@ package body RISCV.Debugger is
    begin
       Instruction := Memory.Read_Word (Mem, PC32);
       Put (To_Hex_64 (Double_Word (CPU.PC)) & ":  " & To_Hex (Instruction) & "  ");
-      Put (Disasm.Disassemble (Instruction, Word (PC32)));
+      Put (Disasm.Disassemble (Instruction, Word (PC32), Xlen64 => True));
 
       --  Show function name if available
       if Dbg.Symbols_Loaded and then
@@ -570,7 +571,8 @@ package body RISCV.Debugger is
    procedure Disassemble_Memory (Dbg     : Debugger_State;
                                  Mem     : in out Memory.Memory_Unit;
                                  Address : Word;
-                                 Count   : Positive) is
+                                 Count   : Positive;
+                                 Xlen64  : Boolean := False) is
       Addr        : Word := Address;
       Instruction : Word;
       Info        : Symbols.Symbol_Info;
@@ -578,7 +580,7 @@ package body RISCV.Debugger is
       for I in 1 .. Count loop
          Instruction := Memory.Read_Word (Mem, Memory_Address (Addr));
          Put (To_Hex (Addr) & ":  " & To_Hex (Instruction) & "  ");
-         Put (Disasm.Disassemble (Instruction, Addr));
+         Put (Disasm.Disassemble (Instruction, Addr, Xlen64));
 
          --  Show function name if available
          if Dbg.Symbols_Loaded and then
@@ -1624,7 +1626,8 @@ package body RISCV.Debugger is
                   begin
                      Put_Line (Trace_File,
                                To_Hex_64 (Double_Word (CPU.PC)) & ":  " & To_Hex (Instr) & "  " &
-                               Disasm.Disassemble (Instr, Word (Memory_Address (CPU.PC))));
+                               Disasm.Disassemble (Instr, Word (Memory_Address (CPU.PC)),
+                                                  Xlen64 => True));
                   end;
                end if;
                Mem.Access_Occurred := False;
@@ -1646,7 +1649,8 @@ package body RISCV.Debugger is
                   begin
                      Put_Line (Trace_File,
                                To_Hex_64 (Double_Word (CPU.PC)) & ":  " & To_Hex (Instr) & "  " &
-                               Disasm.Disassemble (Instr, Word (Memory_Address (CPU.PC))));
+                               Disasm.Disassemble (Instr, Word (Memory_Address (CPU.PC)),
+                                                  Xlen64 => True));
                   end;
                end if;
                Mem.Access_Occurred := False;
@@ -1669,7 +1673,8 @@ package body RISCV.Debugger is
                      begin
                         Put_Line (Trace_File,
                                   To_Hex_64 (Double_Word (CPU.PC)) & ":  " & To_Hex (Instr) & "  " &
-                                  Disasm.Disassemble (Instr, Word (Memory_Address (CPU.PC))));
+                                  Disasm.Disassemble (Instr, Word (Memory_Address (CPU.PC)),
+                                                  Xlen64 => True));
                      end;
                   end if;
 
@@ -1733,7 +1738,7 @@ package body RISCV.Debugger is
                         Count := 10;
                      end if;
                   end if;
-                  Disassemble_Memory (Dbg, Mem, Addr, Count);
+                  Disassemble_Memory (Dbg, Mem, Addr, Count, Xlen64 => True);
                end;
 
             elsif Cmd = "b" then

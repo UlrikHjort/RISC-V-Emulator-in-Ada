@@ -37,7 +37,7 @@ an interactive debugger, a GDB remote stub, an instruction-level profiler,
 instruction coverage tracking, binary trace/replay, and extended CSR support
 (mcountinhibit, mcounteren, HPM stubs) - all in one binary.
 
-**78 test programs, 2189 assertions - all passing.**
+**83 test programs, 2263 assertions - all passing.**
 
 **Typical workflow:**
 
@@ -916,7 +916,7 @@ bin/riscv_emulator --machine qemu-virt --ireplay run1.trace prog.elf
 
 ## 12. Running the Full Test Suite
 
-All 78 test programs can be run in one go from `programs/`:
+All 83 test programs can be run in one go from `programs/`:
 
 ```bash
 cd programs
@@ -936,9 +936,9 @@ aes-modes-test                 6      0 OK
 csr-more-test                 16      0 OK
 
 ---                         ----   ----
-TOTAL                       2189      0
+TOTAL                       2263      0
 
-All tests PASSED (2189 assertions).
+All tests PASSED (2263 assertions).
 ```
 
 ### Rebuild before running
