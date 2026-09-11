@@ -615,19 +615,33 @@ came back with no trap. The decode is now an exact funct7/funct6 dispatch;
 anything unimplemented raises illegal-instruction. Verified against objdump
 and by diffing RV32 vs RV64 results for every affected instruction.
 
-### Vector (RVV 1.0): RV32 only, and SEW=32 in practice
+### Vector (RVV 1.0): RV32 only; element-width correctness in progress
 
 `misa` on the RV64 core does **not** advertise V, and a vector instruction on
 RV64 traps illegal -- RVV is not wired to the 64-bit core.
 
-A deeper limitation affects RV32 too: `RISCV.Vector`'s element path
-(`Read_Element` / `Write_Element`) is `Word`-based and sign-extends from bit
-31, so it is only correct at **SEW=32** (and for unsigned ops at smaller SEW).
-Signed ops at SEW=8/16 and everything at SEW=64 compute wrong results. The
-495-assertion vector suite only exercises SEW=32, which is why this was never
-caught. Fixing it means reworking the element model to a 64-bit representation
-across ~280 subprograms, with no local reference oracle (the QEMU here predates
-RVV 1.0). Until then, treat the vector unit as an SEW=32 accelerator.
+`RISCV.Vector`'s original element path (`Read_Element` / `Write_Element`) is
+`Word`-based and sign-extends from bit 31, so it was only correct at SEW=32.
+A set of SEW-aware 64-bit helpers (`VRead_U` zero-extended, `VRead_S`
+sign-extended from the true SEW boundary, `VWrite` low-SEW-bits, plus 128-bit
+multiply and 64-bit arithmetic-shift helpers) now backs the ops, so an op
+written against them is correct at SEW=8/16/32/64.
+
+Migration status (2026-09-10):
+
+- **Correct at all SEW (8/16/32/64):** integer add/sub/rsub, and/or/xor,
+  mul + mulh/mulhu/mulhsu, sll/srl/sra, min/max/minu/maxu,
+  div/divu/rem/remu, and the integer compares
+  (seq/sne/slt/sltu/sle/sleu/sgt/sgtu) - VV/VX/VI forms. Guarded by
+  `Test_SEW_Correctness` in test/test_vector.adb (24 assertions at e8/e16/e64).
+- **Still SEW=32 only (not yet migrated):** widening (vwadd/vwmul/...),
+  narrowing (vnsrl/vnsra/vnclip), fixed-point saturating (vsadd/vssub/vaadd/
+  vasub/vsmul/vssrl/vssra), reductions, the register moves/slides/gather/
+  compress family, and the FP ops. These still read via the bit-31 path and
+  are correct only at SEW=32.
+
+There is no local reference oracle (the QEMU here predates RVV 1.0), so
+expected values in the test suite are hand-computed.
 
 
 The 32- and 64-bit cores are separate implementations (`riscv-cpu.adb` /

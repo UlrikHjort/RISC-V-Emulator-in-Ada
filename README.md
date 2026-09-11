@@ -7,7 +7,7 @@ a cycle-stall timing model.
 
 | | |
 |---|---|
-| **32-bit ISA** | RV32IMAFDC + RVV 1.0 (SEW=32) + Zbb/Zbs/Zba + Zbkc/Zbkx + Zicsr + Zicond + Zfh |
+| **32-bit ISA** | RV32IMAFDC + RVV 1.0 + Zbb/Zbs/Zba + Zbkc/Zbkx + Zicsr + Zicond + Zfh |
 | **64-bit ISA** | RV64IMAFDC + Zba/Zbb/Zbs/Zbc + Zbkb/Zbkc/Zbkx + Zicond - selected automatically from the ELF header |
 | **Embedded subsets** | RV32E and RV64E, 16 registers, opt-in via `--rv32e` / `--rv64e` |
 | **Privilege** | M, S and U modes, Sv39 MMU, PLIC, CLINT, SBI shim, multi-hart (`--harts N`) |
@@ -55,8 +55,8 @@ the emulator useful for finding wild pointers and stack overflows.
 - **F Extension** - single-precision FP (32 registers, arithmetic, min/max, compare, convert, FMA, FMV, FCLASS, FLD/FSD)
 - **D Extension** - double-precision FP (same operations as F for 64-bit doubles)
 - **C Extension** - 16-bit compressed instructions (RVC 1.0, ~40% code size reduction)
-- **V Extension** - RVV 1.0 vector (32 registers, VLEN=128; integer/FP arithmetic, reductions, masks, gather/scatter, strided load/store).
-  Element width **SEW=32 is fully supported**; signed operations at SEW=8/16 and all SEW=64 operations are not yet correct (RV32 core only). See [STATUS.md](STATUS.md#vector-rvv-10-rv32-only-and-sew32-in-practice).
+- **V Extension** - RVV 1.0 vector (32 registers, VLEN=128; integer/FP arithmetic, reductions, masks, gather/scatter, strided load/store), RV32 core only.
+  Core integer ops (add/sub/logical/shift/min-max/mul/div/compare) are correct at **SEW=8/16/32/64**; widening, narrowing, fixed-point, reductions and FP are currently correct at **SEW=32** only. See [STATUS.md](STATUS.md#vector-rvv-10-rv32-only-element-width-correctness-in-progress).
 - **Zbb/Zbs/Zba** - bit-manipulation (count leading/trailing zeros, popcount, byte/bit set/clear, address generation)
 - **Zbkc/Zbkx** - carry-less multiply (CLMUL, CLMULH, CLMULR) for crypto applications
 - **Zicsr** - CSR instructions (CSRRW, CSRRS, CSRRC + immediate variants)
@@ -464,7 +464,7 @@ and how to check that yours can target RV32.
 - [x] M extension (multiply/divide)
 - [x] F extension (single-precision float)
 - [x] D extension (double-precision float)
-- [x] V extension (vector, RVV 1.0) - SEW=32 (see STATUS.md for the SEW=8/16/64 limitation)
+- [x] V extension (vector, RVV 1.0) - integer core at all SEW; other families SEW=32 (see STATUS.md)
 - [x] Compressed (C) extension support
 
 **Peripherals:**

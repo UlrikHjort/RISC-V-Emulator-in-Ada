@@ -2865,6 +2865,91 @@ procedure Test_Vector is
              "vfredmax = 4.0");
    end Test_FP_Reduction;
 
+   --  ------------------------------------------------------------------
+   --  SEW correctness: signed operations at SEW=8/16 and all operations at
+   --  SEW=64. These are the cases the old Word-based element path got wrong
+   --  (it sign-extended from bit 31 and truncated 64-bit elements). Expected
+   --  values are written as the raw SEW-masked bit pattern to avoid any
+   --  signed/unsigned ambiguity in the check.
+   --  ------------------------------------------------------------------
+   procedure Test_SEW_Correctness is
+      VU : Vector_State;
+      VL : Word;
+      pragma Unreferenced (VL);
+
+      procedure Fill8 (Reg : Register_Index; Val : Word) is
+      begin
+         for I in 0 .. 3 loop Write_Element (VU, Reg, I, SEW_8, Val); end loop;
+      end Fill8;
+      procedure Fill16 (Reg : Register_Index; Val : Word) is
+      begin
+         for I in 0 .. 3 loop Write_Element (VU, Reg, I, SEW_16, Val); end loop;
+      end Fill16;
+      procedure Fill64 (Reg : Register_Index; Val : Unsigned_64) is
+      begin
+         for I in 0 .. 1 loop Write_Element_64 (VU, Reg, I, Val); end loop;
+      end Fill64;
+      function R8  (Reg : Register_Index) return Word is (Read_Element (VU, Reg, 0, SEW_8));
+      function R16 (Reg : Register_Index) return Word is (Read_Element (VU, Reg, 0, SEW_16));
+      function R64 (Reg : Register_Index) return Unsigned_64 is (Read_Element_64 (VU, Reg, 0));
+   begin
+      Put_Line ("Testing SEW=8/16/64 correctness (signed + 64-bit)...");
+
+      --  ---- SEW = 8 ----
+      Initialize (VU); VL := Vsetvl (VU, 4, 16#C0#);
+      Fill8 (1, 16#9C#);   --  -100
+      Fill8 (2, 16#32#);   --   50
+      Fill8 (3, 16#F8#);   --   -8
+      VMIN_VV  (VU, 4, 1, 2, True); Check (R8 (4) = 16#9C#, "e8  vmin(-100,50) = -100");
+      VMAX_VV  (VU, 4, 1, 2, True); Check (R8 (4) = 16#32#, "e8  vmax(-100,50) = 50");
+      VMINU_VV (VU, 4, 1, 2, True); Check (R8 (4) = 16#32#, "e8  vminu(156,50) = 50");
+      VMAXU_VV (VU, 4, 1, 2, True); Check (R8 (4) = 16#9C#, "e8  vmaxu(156,50) = 156");
+      VSRA_VI  (VU, 4, 1, 1, True); Check (R8 (4) = 16#CE#, "e8  vsra(-100,1) = -50");
+      VSRL_VI  (VU, 4, 1, 1, True); Check (R8 (4) = 78,      "e8  vsrl(156,1) = 78");
+      VDIV_VV  (VU, 4, 1, 3, True); Check (R8 (4) = 12,      "e8  vdiv(-100,-8) = 12");
+      VREM_VV  (VU, 4, 1, 3, True); Check (R8 (4) = 16#FC#,  "e8  vrem(-100,-8) = -4");
+      VMUL_VV  (VU, 4, 1, 3, True); Check (R8 (4) = 32,      "e8  vmul(-100,-8) low = 32");
+      VMULH_VV (VU, 4, 1, 3, True); Check (R8 (4) = 3,       "e8  vmulh(-100,-8) = 3");
+      VMULHU_VV (VU, 4, 1, 3, True); Check (R8 (4) = 151,    "e8  vmulhu(156,248) = 151");
+      VMSLT_VV  (VU, 0, 1, 2, True); Check (Get_Mask_Bit (VU, 0), "e8  vmslt(-100<50) true");
+      VMSLTU_VV (VU, 0, 1, 2, True); Check (not Get_Mask_Bit (VU, 0), "e8  vmsltu(156<50) false");
+
+      --  ---- SEW = 16 ----
+      Initialize (VU); VL := Vsetvl (VU, 4, 16#C8#);
+      Fill16 (1, 16#FF9C#);  --  -100
+      Fill16 (2, 16#0032#);  --   50
+      Fill16 (3, 16#FFF8#);  --   -8
+      VMIN_VV (VU, 4, 1, 2, True); Check (R16 (4) = 16#FF9C#, "e16 vmin(-100,50) = -100");
+      VSRA_VX (VU, 4, 1, 1, True); Check (R16 (4) = 16#FFCE#, "e16 vsra(-100,1) = -50");
+      VDIV_VV (VU, 4, 1, 3, True); Check (R16 (4) = 12,       "e16 vdiv(-100,-8) = 12");
+      VADD_VX (VU, 4, 1, 16#FFFFFFFF#, True);
+      Check (R16 (4) = 16#FF9B#, "e16 vadd.vx(-100,-1) = -101 (scalar sign-extended)");
+
+      --  ---- SEW = 64 ----
+      Initialize (VU); VL := Vsetvl (VU, 2, 16#D8#);
+      Fill64 (1, 16#0000_0001_0000_0000#);  --  2**32
+      VADD_VV (VU, 4, 1, 1, True);
+      Check (R64 (4) = 16#0000_0002_0000_0000#, "e64 vadd(2**32,2**32) = 2**33");
+      VMUL_VX (VU, 4, 1, 3, True);
+      Check (R64 (4) = 16#0000_0003_0000_0000#, "e64 vmul.vx(2**32,3) = 3*2**32");
+      Fill64 (2, 16#FFFF_FFFF_FFFF_FFF0#);  --  -16
+      VSRA_VI (VU, 4, 2, 1, True);
+      Check (R64 (4) = 16#FFFF_FFFF_FFFF_FFF8#, "e64 vsra(-16,1) = -8");
+      Fill64 (3, 1);
+      VSLL_VX (VU, 4, 3, 40, True);
+      Check (R64 (4) = 16#0000_0100_0000_0000#, "e64 vsll.vx(1,40) = 2**40");
+      Fill64 (5, 16#4000_0000_0000_0000#);  --  2**62
+      Fill64 (6, 4);
+      VMULH_VV (VU, 4, 5, 6, True);
+      Check (R64 (4) = 1, "e64 vmulh(2**62,4) = 1");
+      Fill64 (7, 16#8000_0000_0000_0000#);
+      Fill64 (8, 2);
+      VMULHU_VV (VU, 4, 7, 8, True);
+      Check (R64 (4) = 1, "e64 vmulhu(2**63,2) = 1");
+      VMIN_VV (VU, 4, 2, 3, True);  --  min(-16, 1) signed
+      Check (R64 (4) = 16#FFFF_FFFF_FFFF_FFF0#, "e64 vmin(-16,1) = -16");
+   end Test_SEW_Correctness;
+
 begin
    Put_Line ("=================================================");
    Put_Line ("       RISCV Emulator V Extension Tests");
@@ -2928,6 +3013,7 @@ begin
    Test_FP_Conversion;
    Test_FP_Widening;
    Test_FP_Reduction;
+   Test_SEW_Correctness;
 
    New_Line;
    Put_Line ("=================================================");

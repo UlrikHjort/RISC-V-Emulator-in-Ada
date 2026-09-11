@@ -32,27 +32,6 @@ package body RISCV.Vector is
    function To_I64 is new Ada.Unchecked_Conversion (Unsigned_64, Integer_64);
 
    --  Arithmetic right shift helper for Signed_Word
-   function SRA (Val : Signed_Word; Shamt : Natural) return Signed_Word is
-      U : constant Word := To_Word (Val);
-      Shifted : Word;
-   begin
-      if Shamt = 0 then
-         return Val;
-      elsif Shamt >= 32 then
-         if Val < 0 then
-            return -1;
-         else
-            return 0;
-         end if;
-      else
-         Shifted := Shift_Right (U, Shamt);
-         --  Sign extend if negative
-         if Val < 0 then
-            Shifted := Shifted or Shift_Left (16#FFFFFFFF#, 32 - Shamt);
-         end if;
-         return To_Signed (Shifted);
-      end if;
-   end SRA;
 
    ----------------
    -- Initialize --
@@ -551,6 +530,137 @@ package body RISCV.Vector is
            Byte (Shift_Right (Value, I * 8) and 16#FF#);
       end loop;
    end Write_Element_64;
+
+   --  =====================================================================
+   --  SEW-aware 64-bit element helpers
+   --
+   --  The plain Read_Element/Write_Element carry a 32-bit Word, which is
+   --  correct only when SEW=32 (and, for zero-extended low-result ops, at
+   --  smaller SEW). These widen the datapath to 64 bits and extend from the
+   --  *true* SEW boundary, so an op written against them is correct at
+   --  SEW=8/16/32/64 -- signed operations included.
+   --  =====================================================================
+
+   --  Zero-extended element value.
+   function VRead_U (VU    : Vector_State;
+                     Reg   : Register_Index;
+                     Index : Natural;
+                     SEW   : SEW_Type) return Unsigned_64 is
+   begin
+      if SEW = SEW_64 then
+         return Read_Element_64 (VU, Reg, Index);
+      else
+         return Unsigned_64 (Read_Element (VU, Reg, Index, SEW));
+      end if;
+   end VRead_U;
+
+   --  Sign-extended element value (from bit SEW-1 up to 64 bits).
+   function VRead_S (VU    : Vector_State;
+                     Reg   : Register_Index;
+                     Index : Natural;
+                     SEW   : SEW_Type) return Integer_64 is
+      U    : constant Unsigned_64 := VRead_U (VU, Reg, Index, SEW);
+      Bits : constant Natural := Get_SEW_Bits (SEW);
+   begin
+      if Bits < 64
+        and then (U and Shift_Left (Unsigned_64'(1), Bits - 1)) /= 0
+      then
+         --  set bit -> extend the sign across the high bits
+         return To_I64 (U or not (Shift_Left (Unsigned_64'(1), Bits) - 1));
+      else
+         return To_I64 (U);
+      end if;
+   end VRead_S;
+
+   --  Write the low SEW bits of Value into the element.
+   procedure VWrite (VU    : in out Vector_State;
+                     Reg   : Register_Index;
+                     Index : Natural;
+                     SEW   : SEW_Type;
+                     Value : Unsigned_64) is
+   begin
+      if SEW = SEW_64 then
+         Write_Element_64 (VU, Reg, Index, Value);
+      else
+         Write_Element (VU, Reg, Index, SEW,
+                        Word (Value and 16#FFFF_FFFF#));
+      end if;
+   end VWrite;
+
+   --  Sign-extend a 32-bit scalar (RV32 XLEN) to 64 bits. For SEW<64 the
+   --  high bits are masked off by VWrite, so this is correct at every SEW.
+   function Splat_U (Rs1 : Word) return Unsigned_64 is
+   begin
+      if (Rs1 and 16#8000_0000#) /= 0 then
+         return Unsigned_64 (Rs1) or 16#FFFF_FFFF_0000_0000#;
+      else
+         return Unsigned_64 (Rs1);
+      end if;
+   end Splat_U;
+
+   --  Arithmetic shift right of a value already sign-extended to 64 bits.
+   function ASR64 (V : Unsigned_64; Shamt : Natural) return Unsigned_64 is
+      R : Unsigned_64;
+   begin
+      if Shamt = 0 then
+         return V;
+      elsif Shamt >= 64 then
+         return (if (V and 16#8000_0000_0000_0000#) /= 0
+                 then 16#FFFF_FFFF_FFFF_FFFF# else 0);
+      end if;
+      R := Shift_Right (V, Shamt);
+      if (V and 16#8000_0000_0000_0000#) /= 0 then
+         R := R or not (Shift_Right (16#FFFF_FFFF_FFFF_FFFF#, Shamt));
+      end if;
+      return R;
+   end ASR64;
+
+   --  Unsigned 64x64 -> 128-bit product (Hi:Lo), schoolbook on 32-bit limbs.
+   procedure UMul128 (A, B : Unsigned_64; Hi, Lo : out Unsigned_64) is
+      A0 : constant Unsigned_64 := A and 16#FFFF_FFFF#;
+      A1 : constant Unsigned_64 := Shift_Right (A, 32);
+      B0 : constant Unsigned_64 := B and 16#FFFF_FFFF#;
+      B1 : constant Unsigned_64 := Shift_Right (B, 32);
+      P00 : constant Unsigned_64 := A0 * B0;
+      P01 : constant Unsigned_64 := A0 * B1;
+      P10 : constant Unsigned_64 := A1 * B0;
+      P11 : constant Unsigned_64 := A1 * B1;
+      Mid : constant Unsigned_64 :=
+         Shift_Right (P00, 32) + (P01 and 16#FFFF_FFFF#) + (P10 and 16#FFFF_FFFF#);
+   begin
+      Lo := (P00 and 16#FFFF_FFFF#) or Shift_Left (Mid and 16#FFFF_FFFF#, 32);
+      Hi := P11 + Shift_Right (P01, 32) + Shift_Right (P10, 32) + Shift_Right (Mid, 32);
+   end UMul128;
+
+   --  High 64 bits of a signed*signed 64-bit product.
+   function SMulhi64 (A, B : Integer_64) return Unsigned_64 is
+      Hi, Lo : Unsigned_64;
+   begin
+      UMul128 (To_U64 (A), To_U64 (B), Hi, Lo);
+      --  Correct the unsigned high for the two sign terms.
+      if A < 0 then Hi := Hi - To_U64 (B); end if;
+      if B < 0 then Hi := Hi - To_U64 (A); end if;
+      return Hi;
+   end SMulhi64;
+
+   --  High 64 bits of a signed*unsigned 64-bit product.
+   function SUMulhi64 (A : Integer_64; B : Unsigned_64) return Unsigned_64 is
+      Hi, Lo : Unsigned_64;
+   begin
+      UMul128 (To_U64 (A), B, Hi, Lo);
+      if A < 0 then Hi := Hi - B; end if;
+      return Hi;
+   end SUMulhi64;
+
+   --  Signed convenience wrapper for VWrite.
+   procedure VWrite_S (VU    : in out Vector_State;
+                       Reg   : Register_Index;
+                       Index : Natural;
+                       SEW   : SEW_Type;
+                       Value : Integer_64) is
+   begin
+      VWrite (VU, Reg, Index, SEW, To_U64 (Value));
+   end VWrite_S;
 
    ------------------
    -- Get_Mask_Bit --
@@ -1136,8 +1246,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) + Read_Element (VU, Vs1, I, SEW));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) + VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1155,8 +1264,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) + Rs1);
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) + Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1174,8 +1282,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) + To_Word (Imm));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) + To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1192,8 +1299,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) - Read_Element (VU, Vs1, I, SEW));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) - VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1211,8 +1317,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) - Rs1);
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) - Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1230,8 +1335,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Rs1 - Read_Element (VU, Vs2, I, SEW));
+            VWrite (VU, Vd, I, SEW, Splat_U (Rs1) - VRead_U (VU, Vs2, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1249,8 +1353,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              To_Word (Imm) - Read_Element (VU, Vs2, I, SEW));
+            VWrite (VU, Vd, I, SEW, To_U64 (Integer_64 (Imm)) - VRead_U (VU, Vs2, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1267,8 +1370,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) and Read_Element (VU, Vs1, I, SEW));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) and VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1286,8 +1388,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) and Rs1);
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) and Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1305,8 +1406,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) and To_Word (Imm));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) and To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1323,8 +1423,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) or Read_Element (VU, Vs1, I, SEW));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) or VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1342,8 +1441,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) or Rs1);
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) or Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1361,8 +1459,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) or To_Word (Imm));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) or To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1379,8 +1476,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) xor Read_Element (VU, Vs1, I, SEW));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) xor VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1398,8 +1494,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) xor Rs1);
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) xor Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1417,8 +1512,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) xor To_Word (Imm));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) xor To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1432,14 +1526,14 @@ package body RISCV.Vector is
                       Vd, Vs2, Vs1 : Register_Index;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : Natural;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Shamt := Natural (Read_Element (VU, Vs1, I, SEW) and
-                              Word (Get_SEW_Bits (SEW) - 1));
-            Write_Element (VU, Vd, I, SEW,
-              Shift_Left (Read_Element (VU, Vs2, I, SEW), Shamt));
+            declare
+               Shamt : constant Natural := Natural (VRead_U (VU, Vs1, I, SEW) and Unsigned_64 (Get_SEW_Bits (SEW) - 1));
+            begin
+               VWrite (VU, Vd, I, SEW, Shift_Left (VRead_U (VU, Vs2, I, SEW), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1454,12 +1548,14 @@ package body RISCV.Vector is
                       Rs1 : Word;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : constant Natural := Natural (Rs1 and Word (Get_SEW_Bits (SEW) - 1));
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Shift_Left (Read_Element (VU, Vs2, I, SEW), Shamt));
+            declare
+               Shamt : constant Natural := Natural (Splat_U (Rs1) and Unsigned_64 (Get_SEW_Bits (SEW) - 1));
+            begin
+               VWrite (VU, Vd, I, SEW, Shift_Left (VRead_U (VU, Vs2, I, SEW), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1474,12 +1570,14 @@ package body RISCV.Vector is
                       Imm : Natural;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : constant Natural := Imm mod Get_SEW_Bits (SEW);
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Shift_Left (Read_Element (VU, Vs2, I, SEW), Shamt));
+            declare
+               Shamt : constant Natural := Imm mod Get_SEW_Bits (SEW);
+            begin
+               VWrite (VU, Vd, I, SEW, Shift_Left (VRead_U (VU, Vs2, I, SEW), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1493,14 +1591,14 @@ package body RISCV.Vector is
                       Vd, Vs2, Vs1 : Register_Index;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : Natural;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Shamt := Natural (Read_Element (VU, Vs1, I, SEW) and
-                              Word (Get_SEW_Bits (SEW) - 1));
-            Write_Element (VU, Vd, I, SEW,
-              Shift_Right (Read_Element (VU, Vs2, I, SEW), Shamt));
+            declare
+               Shamt : constant Natural := Natural (VRead_U (VU, Vs1, I, SEW) and Unsigned_64 (Get_SEW_Bits (SEW) - 1));
+            begin
+               VWrite (VU, Vd, I, SEW, Shift_Right (VRead_U (VU, Vs2, I, SEW), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1515,12 +1613,14 @@ package body RISCV.Vector is
                       Rs1 : Word;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : constant Natural := Natural (Rs1 and Word (Get_SEW_Bits (SEW) - 1));
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Shift_Right (Read_Element (VU, Vs2, I, SEW), Shamt));
+            declare
+               Shamt : constant Natural := Natural (Splat_U (Rs1) and Unsigned_64 (Get_SEW_Bits (SEW) - 1));
+            begin
+               VWrite (VU, Vd, I, SEW, Shift_Right (VRead_U (VU, Vs2, I, SEW), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1535,12 +1635,14 @@ package body RISCV.Vector is
                       Imm : Natural;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : constant Natural := Imm mod Get_SEW_Bits (SEW);
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Shift_Right (Read_Element (VU, Vs2, I, SEW), Shamt));
+            declare
+               Shamt : constant Natural := Imm mod Get_SEW_Bits (SEW);
+            begin
+               VWrite (VU, Vd, I, SEW, Shift_Right (VRead_U (VU, Vs2, I, SEW), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1554,16 +1656,14 @@ package body RISCV.Vector is
                       Vd, Vs2, Vs1 : Register_Index;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : Natural;
-      Val : Signed_Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Shamt := Natural (Read_Element (VU, Vs1, I, SEW) and
-                              Word (Get_SEW_Bits (SEW) - 1));
-            Val := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            Write_Element (VU, Vd, I, SEW,
-              To_Word (SRA (Val, Shamt)));
+            declare
+               Shamt : constant Natural := Natural (VRead_U (VU, Vs1, I, SEW) and Unsigned_64 (Get_SEW_Bits (SEW) - 1));
+            begin
+               VWrite (VU, Vd, I, SEW, ASR64 (To_U64 (VRead_S (VU, Vs2, I, SEW)), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1578,14 +1678,14 @@ package body RISCV.Vector is
                       Rs1 : Word;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : constant Natural := Natural (Rs1 and Word (Get_SEW_Bits (SEW) - 1));
-      Val : Signed_Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Val := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            Write_Element (VU, Vd, I, SEW,
-              To_Word (SRA (Val, Shamt)));
+            declare
+               Shamt : constant Natural := Natural (Splat_U (Rs1) and Unsigned_64 (Get_SEW_Bits (SEW) - 1));
+            begin
+               VWrite (VU, Vd, I, SEW, ASR64 (To_U64 (VRead_S (VU, Vs2, I, SEW)), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1600,14 +1700,14 @@ package body RISCV.Vector is
                       Imm : Natural;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Shamt : constant Natural := Imm mod Get_SEW_Bits (SEW);
-      Val : Signed_Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Val := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            Write_Element (VU, Vd, I, SEW,
-              To_Word (SRA (Val, Shamt)));
+            declare
+               Shamt : constant Natural := Imm mod Get_SEW_Bits (SEW);
+            begin
+               VWrite (VU, Vd, I, SEW, ASR64 (To_U64 (VRead_S (VU, Vs2, I, SEW)), Shamt));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1621,13 +1721,15 @@ package body RISCV.Vector is
                        Vd, Vs2, Vs1 : Register_Index;
                        VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A, B : Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := Read_Element (VU, Vs2, I, SEW);
-            B := Read_Element (VU, Vs1, I, SEW);
-            Write_Element (VU, Vd, I, SEW, (if A < B then A else B));
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := VRead_U (VU, Vs1, I, SEW);
+            begin
+               VWrite (VU, Vd, I, SEW, (if A < B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1642,12 +1744,15 @@ package body RISCV.Vector is
                        Rs1 : Word;
                        VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A : Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := Read_Element (VU, Vs2, I, SEW);
-            Write_Element (VU, Vd, I, SEW, (if A < Rs1 then A else Rs1));
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := Splat_U (Rs1);
+            begin
+               VWrite (VU, Vd, I, SEW, (if A < B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1661,13 +1766,15 @@ package body RISCV.Vector is
                       Vd, Vs2, Vs1 : Register_Index;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A, B : Signed_Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            B := To_Signed (Read_Element (VU, Vs1, I, SEW));
-            Write_Element (VU, Vd, I, SEW, To_Word (if A < B then A else B));
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := VRead_S (VU, Vs1, I, SEW);
+            begin
+               VWrite_S (VU, Vd, I, SEW, (if A < B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1682,13 +1789,15 @@ package body RISCV.Vector is
                       Rs1 : Word;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A, B : Signed_Word;
    begin
-      B := To_Signed (Rs1);
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            Write_Element (VU, Vd, I, SEW, To_Word (if A < B then A else B));
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := To_I64 (Splat_U (Rs1));
+            begin
+               VWrite_S (VU, Vd, I, SEW, (if A < B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1702,13 +1811,15 @@ package body RISCV.Vector is
                        Vd, Vs2, Vs1 : Register_Index;
                        VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A, B : Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := Read_Element (VU, Vs2, I, SEW);
-            B := Read_Element (VU, Vs1, I, SEW);
-            Write_Element (VU, Vd, I, SEW, (if A > B then A else B));
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := VRead_U (VU, Vs1, I, SEW);
+            begin
+               VWrite (VU, Vd, I, SEW, (if A > B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1723,12 +1834,15 @@ package body RISCV.Vector is
                        Rs1 : Word;
                        VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A : Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := Read_Element (VU, Vs2, I, SEW);
-            Write_Element (VU, Vd, I, SEW, (if A > Rs1 then A else Rs1));
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := Splat_U (Rs1);
+            begin
+               VWrite (VU, Vd, I, SEW, (if A > B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1742,13 +1856,15 @@ package body RISCV.Vector is
                       Vd, Vs2, Vs1 : Register_Index;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A, B : Signed_Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            B := To_Signed (Read_Element (VU, Vs1, I, SEW));
-            Write_Element (VU, Vd, I, SEW, To_Word (if A > B then A else B));
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := VRead_S (VU, Vs1, I, SEW);
+            begin
+               VWrite_S (VU, Vd, I, SEW, (if A > B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1763,13 +1879,15 @@ package body RISCV.Vector is
                       Rs1 : Word;
                       VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      A, B : Signed_Word;
    begin
-      B := To_Signed (Rs1);
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            Write_Element (VU, Vd, I, SEW, To_Word (if A > B then A else B));
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := To_I64 (Splat_U (Rs1));
+            begin
+               VWrite_S (VU, Vd, I, SEW, (if A > B then A else B));
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -1782,8 +1900,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              Read_Element (VU, Vs2, I, SEW) = Read_Element (VU, Vs1, I, SEW));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) = VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1794,7 +1911,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) = Rs1);
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) = Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1805,7 +1922,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) = To_Word (Imm));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) = To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1816,8 +1933,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              Read_Element (VU, Vs2, I, SEW) /= Read_Element (VU, Vs1, I, SEW));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) /= VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1828,7 +1944,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) /= Rs1);
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) /= Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1839,7 +1955,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) /= To_Word (Imm));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) /= To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1850,8 +1966,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              Read_Element (VU, Vs2, I, SEW) < Read_Element (VU, Vs1, I, SEW));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) < VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1862,7 +1977,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) < Rs1);
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) < Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1873,9 +1988,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) <
-              To_Signed (Read_Element (VU, Vs1, I, SEW)));
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) < VRead_S (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1886,8 +1999,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) < To_Signed (Rs1));
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) < To_I64 (Splat_U (Rs1)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1898,8 +2010,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              Read_Element (VU, Vs2, I, SEW) <= Read_Element (VU, Vs1, I, SEW));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) <= VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1910,7 +2021,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) <= Rs1);
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) <= Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1921,7 +2032,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) <= To_Word (Imm));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) <= To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1932,9 +2043,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) <=
-              To_Signed (Read_Element (VU, Vs1, I, SEW)));
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) <= VRead_S (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1945,8 +2054,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) <= To_Signed (Rs1));
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) <= To_I64 (Splat_U (Rs1)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1957,8 +2065,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) <= Imm);
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) <= Integer_64 (Imm));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1969,7 +2076,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) > Rs1);
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) > Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1980,7 +2087,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I, Read_Element (VU, Vs2, I, SEW) > To_Word (Imm));
+            Set_Mask_Bit (VU, Vd, I, VRead_U (VU, Vs2, I, SEW) > To_U64 (Integer_64 (Imm)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -1991,8 +2098,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) > To_Signed (Rs1));
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) > To_I64 (Splat_U (Rs1)));
          end if;
       end loop;
       VU.VStart := 0;
@@ -2003,8 +2109,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Set_Mask_Bit (VU, Vd, I,
-              To_Signed (Read_Element (VU, Vs2, I, SEW)) > Imm);
+            Set_Mask_Bit (VU, Vd, I, VRead_S (VU, Vs2, I, SEW) > Integer_64 (Imm));
          end if;
       end loop;
       VU.VStart := 0;
@@ -2016,8 +2121,7 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) * Read_Element (VU, Vs1, I, SEW));
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) * VRead_U (VU, Vs1, I, SEW));
          end if;
       end loop;
       VU.VStart := 0;
@@ -2028,80 +2132,95 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Write_Element (VU, Vd, I, SEW,
-              Read_Element (VU, Vs2, I, SEW) * Rs1);
+            VWrite (VU, Vd, I, SEW, VRead_U (VU, Vs2, I, SEW) * Splat_U (Rs1));
          end if;
       end loop;
       VU.VStart := 0;
    end VMUL_VX;
 
    procedure VMULH_VV (VU : in out Vector_State; Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A64, B64 : Integer_64;
-      Prod     : Integer_64;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A64 := Integer_64 (To_Signed (Read_Element (VU, Vs2, I, SEW)));
-            B64 := Integer_64 (To_Signed (Read_Element (VU, Vs1, I, SEW)));
-            Prod := A64 * B64;
-            Write_Element (VU, Vd, I, SEW,
-              Word (Shift_Right (To_U64 (Prod), SEW_Bits)));
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := VRead_S (VU, Vs1, I, SEW);
+            begin
+               if SEW = SEW_64 then
+                  VWrite (VU, Vd, I, SEW, SMulhi64 (A, B));
+               else
+                  VWrite (VU, Vd, I, SEW,
+                    Shift_Right (To_U64 (A * B), Get_SEW_Bits (SEW)));
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VMULH_VV;
 
    procedure VMULH_VX (VU : in out Vector_State; Vd, Vs2 : Register_Index; Rs1 : Word; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A64      : Integer_64;
-      B64      : constant Integer_64 := Integer_64 (To_Signed (Rs1));
-      Prod     : Integer_64;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A64 := Integer_64 (To_Signed (Read_Element (VU, Vs2, I, SEW)));
-            Prod := A64 * B64;
-            Write_Element (VU, Vd, I, SEW,
-              Word (Shift_Right (To_U64 (Prod), SEW_Bits)));
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := To_I64 (Splat_U (Rs1));
+            begin
+               if SEW = SEW_64 then
+                  VWrite (VU, Vd, I, SEW, SMulhi64 (A, B));
+               else
+                  VWrite (VU, Vd, I, SEW,
+                    Shift_Right (To_U64 (A * B), Get_SEW_Bits (SEW)));
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VMULH_VX;
 
    procedure VMULHU_VV (VU : in out Vector_State; Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A64, B64 : Unsigned_64;
-      Prod     : Unsigned_64;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A64 := Unsigned_64 (Read_Element (VU, Vs2, I, SEW));
-            B64 := Unsigned_64 (Read_Element (VU, Vs1, I, SEW));
-            Prod := A64 * B64;
-            Write_Element (VU, Vd, I, SEW,
-              Word (Shift_Right (Prod, SEW_Bits)));
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := VRead_U (VU, Vs1, I, SEW);
+               Hi, Lo : Unsigned_64;
+            begin
+               if SEW = SEW_64 then
+                  UMul128 (A, B, Hi, Lo);
+                  VWrite (VU, Vd, I, SEW, Hi);
+               else
+                  VWrite (VU, Vd, I, SEW,
+                    Shift_Right (A * B, Get_SEW_Bits (SEW)));
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VMULHU_VV;
 
    procedure VMULHU_VX (VU : in out Vector_State; Vd, Vs2 : Register_Index; Rs1 : Word; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A64      : Unsigned_64;
-      B64      : constant Unsigned_64 := Unsigned_64 (Rs1);
-      Prod     : Unsigned_64;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A64 := Unsigned_64 (Read_Element (VU, Vs2, I, SEW));
-            Prod := A64 * B64;
-            Write_Element (VU, Vd, I, SEW,
-              Word (Shift_Right (Prod, SEW_Bits)));
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := Splat_U (Rs1);
+               Hi, Lo : Unsigned_64;
+            begin
+               if SEW = SEW_64 then
+                  UMul128 (A, B, Hi, Lo);
+                  VWrite (VU, Vd, I, SEW, Hi);
+               else
+                  VWrite (VU, Vd, I, SEW,
+                    Shift_Right (A * B, Get_SEW_Bits (SEW)));
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -2109,17 +2228,19 @@ package body RISCV.Vector is
 
    procedure VDIVU_VV (VU : in out Vector_State; Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Divisor : Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Divisor := Read_Element (VU, Vs1, I, SEW);
-            if Divisor = 0 then
-               Write_Element (VU, Vd, I, SEW, 16#FFFFFFFF#);
-            else
-               Write_Element (VU, Vd, I, SEW,
-                 Read_Element (VU, Vs2, I, SEW) / Divisor);
-            end if;
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := VRead_U (VU, Vs1, I, SEW);
+            begin
+               if B = 0 then
+                  VWrite (VU, Vd, I, SEW, 16#FFFF_FFFF_FFFF_FFFF#);
+               else
+                  VWrite (VU, Vd, I, SEW, A / B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -2130,61 +2251,60 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            if Rs1 = 0 then
-               Write_Element (VU, Vd, I, SEW, 16#FFFFFFFF#);
-            else
-               Write_Element (VU, Vd, I, SEW,
-                 Read_Element (VU, Vs2, I, SEW) / Rs1);
-            end if;
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := Splat_U (Rs1);
+            begin
+               if B = 0 then
+                  VWrite (VU, Vd, I, SEW, 16#FFFF_FFFF_FFFF_FFFF#);
+               else
+                  VWrite (VU, Vd, I, SEW, A / B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VDIVU_VX;
 
    procedure VDIV_VV (VU : in out Vector_State; Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A, B     : Signed_Word;
-      Min_Val  : Signed_Word;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
-      --  Compute minimum value for current SEW
-      Min_Val := To_Signed (Shift_Left (1, SEW_Bits - 1));
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            B := To_Signed (Read_Element (VU, Vs1, I, SEW));
-            if B = 0 then
-               --  Division by zero: result is -1
-               Write_Element (VU, Vd, I, SEW, 16#FFFFFFFF#);
-            elsif A = Min_Val and B = -1 then
-               --  Overflow: INT_MIN / -1 = INT_MIN
-               Write_Element (VU, Vd, I, SEW, To_Word (Min_Val));
-            else
-               Write_Element (VU, Vd, I, SEW, To_Word (A / B));
-            end if;
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := VRead_S (VU, Vs1, I, SEW);
+            begin
+               if B = 0 then
+                  VWrite (VU, Vd, I, SEW, 16#FFFF_FFFF_FFFF_FFFF#);
+               elsif SEW = SEW_64 and then A = Integer_64'First and then B = -1 then
+                  VWrite_S (VU, Vd, I, SEW, A);
+               else
+                  VWrite_S (VU, Vd, I, SEW, A / B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VDIV_VV;
 
    procedure VDIV_VX (VU : in out Vector_State; Vd, Vs2 : Register_Index; Rs1 : Word; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A        : Signed_Word;
-      B        : constant Signed_Word := To_Signed (Rs1);
-      Min_Val  : Signed_Word;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
-      Min_Val := To_Signed (Shift_Left (1, SEW_Bits - 1));
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            if B = 0 then
-               Write_Element (VU, Vd, I, SEW, 16#FFFFFFFF#);
-            elsif A = Min_Val and B = -1 then
-               Write_Element (VU, Vd, I, SEW, To_Word (Min_Val));
-            else
-               Write_Element (VU, Vd, I, SEW, To_Word (A / B));
-            end if;
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := To_I64 (Splat_U (Rs1));
+            begin
+               if B = 0 then
+                  VWrite (VU, Vd, I, SEW, 16#FFFF_FFFF_FFFF_FFFF#);
+               elsif SEW = SEW_64 and then A = Integer_64'First and then B = -1 then
+                  VWrite_S (VU, Vd, I, SEW, A);
+               else
+                  VWrite_S (VU, Vd, I, SEW, A / B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -2192,17 +2312,19 @@ package body RISCV.Vector is
 
    procedure VREMU_VV (VU : in out Vector_State; Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
       SEW : constant SEW_Type := VU.VType.VSEW;
-      Divisor : Word;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            Divisor := Read_Element (VU, Vs1, I, SEW);
-            if Divisor = 0 then
-               Write_Element (VU, Vd, I, SEW, Read_Element (VU, Vs2, I, SEW));
-            else
-               Write_Element (VU, Vd, I, SEW,
-                 Read_Element (VU, Vs2, I, SEW) mod Divisor);
-            end if;
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := VRead_U (VU, Vs1, I, SEW);
+            begin
+               if B = 0 then
+                  VWrite (VU, Vd, I, SEW, A);
+               else
+                  VWrite (VU, Vd, I, SEW, A mod B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -2213,60 +2335,60 @@ package body RISCV.Vector is
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            if Rs1 = 0 then
-               Write_Element (VU, Vd, I, SEW, Read_Element (VU, Vs2, I, SEW));
-            else
-               Write_Element (VU, Vd, I, SEW,
-                 Read_Element (VU, Vs2, I, SEW) mod Rs1);
-            end if;
+            declare
+               A : constant Unsigned_64 := VRead_U (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := Splat_U (Rs1);
+            begin
+               if B = 0 then
+                  VWrite (VU, Vd, I, SEW, A);
+               else
+                  VWrite (VU, Vd, I, SEW, A mod B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VREMU_VX;
 
    procedure VREM_VV (VU : in out Vector_State; Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A, B     : Signed_Word;
-      Min_Val  : Signed_Word;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
-      Min_Val := To_Signed (Shift_Left (1, SEW_Bits - 1));
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            B := To_Signed (Read_Element (VU, Vs1, I, SEW));
-            if B = 0 then
-               --  Remainder by zero: result is dividend
-               Write_Element (VU, Vd, I, SEW, To_Word (A));
-            elsif A = Min_Val and B = -1 then
-               --  Overflow: INT_MIN % -1 = 0
-               Write_Element (VU, Vd, I, SEW, 0);
-            else
-               Write_Element (VU, Vd, I, SEW, To_Word (A rem B));
-            end if;
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := VRead_S (VU, Vs1, I, SEW);
+            begin
+               if B = 0 then
+                  VWrite_S (VU, Vd, I, SEW, A);
+               elsif SEW = SEW_64 and then A = Integer_64'First and then B = -1 then
+                  VWrite (VU, Vd, I, SEW, 0);
+               else
+                  VWrite_S (VU, Vd, I, SEW, A rem B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
    end VREM_VV;
 
    procedure VREM_VX (VU : in out Vector_State; Vd, Vs2 : Register_Index; Rs1 : Word; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      A        : Signed_Word;
-      B        : constant Signed_Word := To_Signed (Rs1);
-      Min_Val  : Signed_Word;
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
-      Min_Val := To_Signed (Shift_Left (1, SEW_Bits - 1));
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
-            A := To_Signed (Read_Element (VU, Vs2, I, SEW));
-            if B = 0 then
-               Write_Element (VU, Vd, I, SEW, To_Word (A));
-            elsif A = Min_Val and B = -1 then
-               Write_Element (VU, Vd, I, SEW, 0);
-            else
-               Write_Element (VU, Vd, I, SEW, To_Word (A rem B));
-            end if;
+            declare
+               A : constant Integer_64 := VRead_S (VU, Vs2, I, SEW);
+               B : constant Integer_64 := To_I64 (Splat_U (Rs1));
+            begin
+               if B = 0 then
+                  VWrite_S (VU, Vd, I, SEW, A);
+               elsif SEW = SEW_64 and then A = Integer_64'First and then B = -1 then
+                  VWrite (VU, Vd, I, SEW, 0);
+               else
+                  VWrite_S (VU, Vd, I, SEW, A rem B);
+               end if;
+            end;
          end if;
       end loop;
       VU.VStart := 0;
@@ -5028,18 +5150,20 @@ package body RISCV.Vector is
 
    procedure VMULHSU_VV (VU : in out Vector_State;
                          Vd, Vs2, Vs1 : Register_Index; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
             declare
-               A : constant Integer_64 := Integer_64 (To_Signed (Read_Element (VU, Vs2, I, SEW)));
-               B : constant Unsigned_64 := Unsigned_64 (Read_Element (VU, Vs1, I, SEW));
-               Product : constant Integer_64 := A * Integer_64 (B);
+               A : constant Integer_64  := VRead_S (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := VRead_U (VU, Vs1, I, SEW);
             begin
-               Write_Element (VU, Vd, I, SEW,
-                 Word (Shift_Right (To_U64 (Product), SEW_Bits) and 16#FFFFFFFF#));
+               if SEW = SEW_64 then
+                  VWrite (VU, Vd, I, SEW, SUMulhi64 (A, B));
+               else
+                  VWrite (VU, Vd, I, SEW,
+                    Shift_Right (To_U64 (A * To_I64 (B)), Get_SEW_Bits (SEW)));
+               end if;
             end;
          end if;
       end loop;
@@ -5048,18 +5172,20 @@ package body RISCV.Vector is
 
    procedure VMULHSU_VX (VU : in out Vector_State;
                          Vd, Vs2 : Register_Index; Rs1 : Word; VM : Boolean) is
-      SEW      : constant SEW_Type := VU.VType.VSEW;
-      SEW_Bits : constant Natural := Get_SEW_Bits (SEW);
-      B        : constant Unsigned_64 := Unsigned_64 (Rs1);
+      SEW : constant SEW_Type := VU.VType.VSEW;
    begin
       for I in Natural (VU.VStart) .. Natural (VU.VL) - 1 loop
          if VM or else Get_Mask_Bit (VU, I) then
             declare
-               A : constant Integer_64 := Integer_64 (To_Signed (Read_Element (VU, Vs2, I, SEW)));
-               Product : constant Integer_64 := A * Integer_64 (B);
+               A : constant Integer_64  := VRead_S (VU, Vs2, I, SEW);
+               B : constant Unsigned_64 := Splat_U (Rs1);
             begin
-               Write_Element (VU, Vd, I, SEW,
-                 Word (Shift_Right (To_U64 (Product), SEW_Bits) and 16#FFFFFFFF#));
+               if SEW = SEW_64 then
+                  VWrite (VU, Vd, I, SEW, SUMulhi64 (A, B));
+               else
+                  VWrite (VU, Vd, I, SEW,
+                    Shift_Right (To_U64 (A * To_I64 (B)), Get_SEW_Bits (SEW)));
+               end if;
             end;
          end if;
       end loop;
