@@ -24,7 +24,7 @@ The RISC-V emulator includes several independent layers of testing:
 | Bare-metal test suite | `cd programs && ./test-all.sh` | 83 programs, 2263 assertions |
 | Ada unit tests | `make test` | Peripherals, traps, CSRs, atomics, compressed, vector |
 | Official riscv-tests | `bash programs/run-riscv-tests.sh` | 284/293 upstream conformance tests |
-| Architecture compliance | `arch-test/run_arch_tests.sh <suite>` | riscv-arch-test, 7 suites (see below) |
+| Architecture compliance | `arch-test/run_arch_tests.sh <suite>` (or `all`) | riscv-arch-test, 7 suites (see below) |
 
 - **Self-reporting tests** - Each program emits its own PASS/FAIL assertions
 - **Multiple machine profiles** - Test simple and qemu-virt memory layouts
@@ -32,8 +32,10 @@ The RISC-V emulator includes several independent layers of testing:
 
 ### Architecture compliance: expected results
 
-`arch-test/run_arch_tests.sh` takes one suite name. These are the current
-numbers, so you can tell a real regression from a known deviation:
+`arch-test/run_arch_tests.sh` takes one suite name, or `all` to run every
+suite in turn and print a combined summary (exit status is non-zero if any
+suite has failures). These are the current per-suite numbers, so you can
+tell a real regression from a known deviation:
 
 | Suite | Result | Notes |
 |-------|--------|-------|
