@@ -20,10 +20,22 @@ TARGET = $(BIN_DIR)/riscv_emulator
 # Main source file
 MAIN = main.adb
 
+# ---------------------------------------------------------------------------
+# Install locations (override on the command line, e.g. PREFIX=$HOME/.local).
+# DESTDIR is honoured for staged/packaging installs.
+#   PREFIX   install root            (default /usr/local)
+#   BINDIR   where the binary goes    ($(PREFIX)/bin)
+#   DATADIR  where example profiles go ($(PREFIX)/share/riscv_emulator)
+# ---------------------------------------------------------------------------
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+DATADIR ?= $(PREFIX)/share/riscv_emulator
+INSTALL ?= install
+
 # C helper object
 C_FP_OBJ = $(OBJ_DIR)/riscv_fp_helpers.o
 
-.PHONY: all clean rebuild run debug arch-test
+.PHONY: all clean rebuild run debug arch-test install uninstall
 
 all: $(TARGET)
 
@@ -138,6 +150,29 @@ test: test-peripherals test-atomics test-compressed test-csr test-traps test-pri
 arch-test: $(TARGET)
 	$(MAKE) -C arch-test test
 
+install: $(TARGET)
+	@echo "Installing to $(DESTDIR)$(PREFIX)"
+	$(INSTALL) -d "$(DESTDIR)$(BINDIR)"
+	$(INSTALL) -m 755 "$(TARGET)" "$(DESTDIR)$(BINDIR)/riscv_emulator"
+	$(INSTALL) -d "$(DESTDIR)$(DATADIR)/profiles"
+	$(INSTALL) -m 644 profiles/*.cfg "$(DESTDIR)$(DATADIR)/profiles/"
+	$(INSTALL) -m 644 riscv_emulatorrc.example "$(DESTDIR)$(DATADIR)/"
+	@echo ""
+	@echo "Installed:"
+	@echo "  $(DESTDIR)$(BINDIR)/riscv_emulator"
+	@echo "  $(DESTDIR)$(DATADIR)/profiles/*.cfg"
+	@echo "  $(DESTDIR)$(DATADIR)/riscv_emulatorrc.example"
+	@echo ""
+	@echo "The installed profiles are found by bare name automatically, e.g."
+	@echo "  riscv_emulator --config qemu-virt program.elf"
+	@echo "For defaults, copy the example rc to ~/.config/riscv_emulator/config."
+	@echo "Make sure $(BINDIR) is on your PATH."
+
+uninstall:
+	rm -f "$(DESTDIR)$(BINDIR)/riscv_emulator"
+	rm -rf "$(DESTDIR)$(DATADIR)"
+	@echo "Removed riscv_emulator and $(DESTDIR)$(DATADIR)"
+
 help:
 	@echo "RISC-V Emulator (RV32IM) Build System"
 	@echo ""
@@ -147,4 +182,9 @@ help:
 	@echo "  clean    - Remove build artifacts"
 	@echo "  rebuild  - Clean and rebuild"
 	@echo "  run      - Show usage"
+	@echo "  install  - Install binary + example profiles (PREFIX=$(PREFIX))"
+	@echo "  uninstall- Remove an installed copy"
 	@echo "  help     - Show this help"
+	@echo ""
+	@echo "Install variables: PREFIX, BINDIR, DATADIR, DESTDIR"
+	@echo "  e.g.  make install PREFIX=$$HOME/.local"

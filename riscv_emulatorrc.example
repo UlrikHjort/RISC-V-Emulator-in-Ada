@@ -1,0 +1,25 @@
+# Example riscv_emulator configuration file.
+#
+# Copy to one of:
+#   ~/.riscv_emulatorrc                     (classic)
+#   ~/.config/riscv_emulator/config         (XDG; takes precedence)
+# or point $RISCV_EMULATORRC at an explicit path.
+#
+# These are DEFAULTS only -- any command-line flag overrides the matching key.
+# Lines starting with '#' or ';' are comments. A leading "~/" expands to $HOME.
+
+# Default hardware profile: a built-in name (simple, qemu-virt) ...
+machine = qemu-virt
+
+# ... or, instead of 'machine', a custom profile resolved by name or path.
+# (If both are set, config wins, mirroring the command line.)
+# config = myboard
+
+# Guest access to host files: off, ro, or rw (default rw).
+host-io = rw
+
+# Confine guest host-file paths to this directory (default: current dir).
+# host-io-root = ~/riscv-sandbox
+
+# Where semihosting log files are written (default: current dir).
+# log-dir = ~/riscv-logs

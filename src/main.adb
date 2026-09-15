@@ -40,6 +40,7 @@ with RISCV.Trace_Replay;
 with RISCV.CSR;
 with RISCV.ELF;           use RISCV.ELF;
 with RISCV.Config;
+with RISCV.Settings;
 with RISCV.CPU64;
 with RISCV.CSR64;
 with RISCV.Cache;
@@ -94,6 +95,10 @@ procedure Main is
    Host_IO_Sel   : Memory.Host_IO_Mode := Memory.Read_Write;
    Host_Root_Buf : String (1 .. Memory.Max_Host_Root) := (others => ' ');
    Host_Root_Len : Natural := 0;
+
+   --  Which rc file (if any) supplied defaults, for a --verbose note.
+   RC_Src_Buf    : String (1 .. Settings.Max_Val) := (others => ' ');
+   RC_Src_Len    : Natural := 0;
 
    --  Raise load/store/instruction access faults on unmapped or
    --  permission-denied accesses (default on; --no-access-faults restores
@@ -190,6 +195,14 @@ procedure Main is
       Put_Line ("  riscv_emulator program.elf");
       Put_Line ("  riscv_emulator --machine qemu-virt firmware.elf");
       Put_Line ("  riscv_emulator --config myboard.cfg program.elf");
+      Put_Line ("");
+      Put_Line ("Configuration:");
+      Put_Line ("  --config accepts a path OR a profile name looked up in:");
+      Put_Line ("    ./ , $RISCV_EMULATOR_PROFILES , ~/.config/riscv_emulator/profiles/ ,");
+      Put_Line ("    and the installed share/riscv_emulator/profiles/ next to the binary");
+      Put_Line ("  Defaults may be set in an rc file (command-line flags override):");
+      Put_Line ("    ~/.riscv_emulatorrc  and  ~/.config/riscv_emulator/config");
+      Put_Line ("    keys: machine, config, host-io, host-io-root, log-dir");
    end Print_Usage;
 
    procedure Print_Profiles is
@@ -219,6 +232,55 @@ begin
       Print_Usage;
       return;
    end if;
+
+   --  Apply rc-file defaults (command-line flags below override them).
+   declare
+      RC : constant Settings.RC_Config := Settings.Read_RC;
+
+      procedure Seed (Dst  : in out String;
+                      Len  : in out Natural;
+                      Item : Settings.Setting) is
+      begin
+         if Item.Present then
+            Len := Natural'Min (Item.Length, Dst'Length);
+            Dst (Dst'First .. Dst'First + Len - 1) :=
+               Item.Value (1 .. Len);
+         end if;
+      end Seed;
+   begin
+      if RC.Machine.Present then
+         Seed (Machine_Name, Machine_Len, RC.Machine);
+         Use_Profile := True;
+      end if;
+      if RC.Config.Present then
+         Seed (Config_File, Config_Len, RC.Config);
+         Use_Profile := True;
+      end if;
+      if RC.Log_Dir.Present then
+         Seed (Log_Dir_Buf, Log_Dir_Len, RC.Log_Dir);
+      end if;
+      if RC.Host_IO_Root.Present then
+         Seed (Host_Root_Buf, Host_Root_Len, RC.Host_IO_Root);
+      end if;
+      if RC.Host_IO.Present then
+         declare
+            V : constant String := RC.Host_IO.Value (1 .. RC.Host_IO.Length);
+         begin
+            if    V = "off" then Host_IO_Sel := Memory.Off;
+            elsif V = "ro"  then Host_IO_Sel := Memory.Read_Only;
+            elsif V = "rw"  then Host_IO_Sel := Memory.Read_Write;
+            else
+               Put_Line (Standard_Error,
+                  "Warning: rc host-io must be off, ro or rw (got '" &
+                  V & "'); ignored");
+            end if;
+         end;
+      end if;
+      if RC.Source_Len > 0 then
+         RC_Src_Len := RC.Source_Len;
+         RC_Src_Buf (1 .. RC_Src_Len) := RC.Source (1 .. RC.Source_Len);
+      end if;
+   end;
 
    --  Parse options
    while Arg_Index <= Argument_Count loop
@@ -555,6 +617,7 @@ begin
                Machine_Name (1 .. Len) :=
                   Name (Name'First .. Name'First + Len - 1);
                Machine_Len := Len;
+               Config_Len := 0;   --  CLI --machine overrides any rc config
                Use_Profile := True;
             end;
             Arg_Index := Arg_Index + 1;
@@ -571,6 +634,7 @@ begin
                Config_File (1 .. Len) :=
                   Name (Name'First .. Name'First + Len - 1);
                Config_Len := Len;
+               Machine_Len := 0;   --  CLI --config overrides any rc machine
                Use_Profile := True;
             end;
             Arg_Index := Arg_Index + 1;
@@ -599,18 +663,33 @@ begin
       return;
    end if;
 
+   if Verbose and RC_Src_Len > 0 then
+      Put_Line ("Applied rc defaults from: " & RC_Src_Buf (1 .. RC_Src_Len));
+   end if;
+
    --  Load or select hardware profile
    if Config_Len > 0 then
-      --  Load profile from file
-      Config.Load_Profile (Config_File (1 .. Config_Len), Profile, Success);
-      if not Success then
-         Put_Line ("Error: Failed to load profile from " &
-            Config_File (1 .. Config_Len));
-         return;
-      end if;
-      if Verbose then
-         Put_Line ("Loaded profile from: " & Config_File (1 .. Config_Len));
-      end if;
+      --  Resolve the --config argument (a path, or a bare profile name looked
+      --  up on the profile search path), then load it.
+      declare
+         Resolved : constant String :=
+            Settings.Resolve_Profile (Config_File (1 .. Config_Len));
+      begin
+         if Resolved = "" then
+            Put_Line ("Error: profile '" & Config_File (1 .. Config_Len) &
+                      "' not found");
+            Put_Line ("  searched: " & Settings.Profile_Search_Description);
+            return;
+         end if;
+         Config.Load_Profile (Resolved, Profile, Success);
+         if not Success then
+            Put_Line ("Error: Failed to load profile from " & Resolved);
+            return;
+         end if;
+         if Verbose then
+            Put_Line ("Loaded profile from: " & Resolved);
+         end if;
+      end;
    elsif Machine_Len > 0 then
       --  Use built-in profile. Reject unknown names rather than silently
       --  falling back to "simple": the wrong memory map produces a confusing

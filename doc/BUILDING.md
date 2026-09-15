@@ -67,7 +67,71 @@ make rebuild  # Clean and build
 | `make clean` | Remove obj/ and bin/ contents |
 | `make rebuild` | Clean then build |
 | `make test` | Run unit tests |
+| `make install` | Install the binary + example profiles (see below) |
+| `make uninstall` | Remove an installed copy |
 | `make help` | Show available targets |
+
+## Installing
+
+```bash
+make install                       # -> /usr/local (may need sudo)
+make install PREFIX=$HOME/.local   # user-local, no sudo
+```
+
+`make install` places:
+
+| What | Where | Override |
+|------|-------|----------|
+| the binary | `$(PREFIX)/bin/riscv_emulator` | `PREFIX`, `BINDIR` |
+| example profiles | `$(PREFIX)/share/riscv_emulator/profiles/*.cfg` | `DATADIR` |
+| example rc file | `$(PREFIX)/share/riscv_emulator/riscv_emulatorrc.example` | `DATADIR` |
+
+`DESTDIR` is honoured for staged/packaging installs
+(`make install DESTDIR=/tmp/stage`). `make uninstall` removes the binary and
+the data directory. Nothing is installed outside these paths, and the binary
+still runs fine straight from `bin/` without installing.
+
+## Configuration
+
+### Profile lookup by name
+
+`--config` accepts a path *or* a bare profile name. A name (no `/`) is searched
+for, as `<name>` and `<name>.cfg`, in:
+
+1. the current directory
+2. each directory in `$RISCV_EMULATOR_PROFILES` (colon-separated)
+3. `~/.config/riscv_emulator/profiles/`
+4. the installed `share/riscv_emulator/profiles/` next to the binary (found via
+   the executable's own location)
+
+So after `make install`, an installed emulator finds its shipped profiles with
+no setup:
+
+```bash
+riscv_emulator --config qemu-virt program.elf
+```
+
+A path (or an existing file) is always used as given. A name that resolves
+nowhere reports the list of directories that were searched.
+
+### rc file (defaults)
+
+Defaults may be set in an rc file, read before the command line, so any flag
+overrides the matching key. Two locations are read (the second overriding the
+first), plus an explicit override:
+
+1. `~/.riscv_emulatorrc`
+2. `~/.config/riscv_emulator/config` (or `$XDG_CONFIG_HOME/...`)
+3. `$RISCV_EMULATORRC` (an explicit path; wins)
+
+Recognised keys mirror the flags: `machine`, `config`, `host-io`,
+`host-io-root`, `log-dir`. Comments start with `#` or `;`; a leading `~/` in a
+value expands to `$HOME`; unknown keys are warned about, not fatal. See
+`riscv_emulatorrc.example` for a template. Run with `-v` to see which rc file
+was applied.
+
+Note that behaviour/security toggles (`--no-access-faults`, `--gdb-listen-all`)
+are deliberately *not* settable from the rc file - they must be chosen per run.
 
 ## Compiler Flags
 
