@@ -11,8 +11,7 @@
 #define N 128
 static int32_t m[N][N];
 
-int main(void)
-{
+int main(void) {
     log_init("sum-colmajor.log");
 
     for (int i = 0; i < N; i++)

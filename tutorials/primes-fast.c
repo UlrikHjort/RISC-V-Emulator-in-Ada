@@ -10,8 +10,7 @@
 
 #define LIMIT 4000
 
-static int __attribute__((noinline)) is_prime(uint32_t n)
-{
+static int __attribute__((noinline)) is_prime(uint32_t n) {
     if (n < 2)      return 0;
     if (n % 2 == 0) return n == 2;
     for (uint32_t d = 3; d * d <= n; d += 2)   /* odd divisors up to sqrt(n) */
@@ -19,16 +18,14 @@ static int __attribute__((noinline)) is_prime(uint32_t n)
     return 1;
 }
 
-static uint32_t __attribute__((noinline)) count_primes(uint32_t limit)
-{
+static uint32_t __attribute__((noinline)) count_primes(uint32_t limit) {
     uint32_t count = 0;
     for (uint32_t n = 2; n < limit; n++)
         if (is_prime(n)) count++;
     return count;
 }
 
-int main(void)
-{
+int main(void) {
     log_init("primes-fast.log");
     uint32_t c = count_primes(LIMIT);
     log_write(NONE, "primes below %u: %u\n", (unsigned) LIMIT, (unsigned) c);

@@ -13,16 +13,14 @@
 #include <stdint.h>
 #include "log.h"
 
-static int *__attribute__((noinline)) slot_for(int *table, int n, int key)
-{
+static int *__attribute__((noinline)) slot_for(int *table, int n, int key) {
     for (int i = 0; i < n; i++)
         if (table[i * 2] == key)
             return &table[i * 2 + 1];
     return 0;                     /* not found */
 }
 
-int main(void)
-{
+int main(void) {
     int table[8] = { 1, 10, 2, 20, 3, 30, 4, 40 };
     volatile int lookup_key = 99;      /* pretend this came from input */
 
