@@ -31,12 +31,14 @@ the emulator useful for finding wild pointers and stack overflows.
 
 ### User Guides
 
+- **[tutorials/](tutorials/)** - Task-oriented walkthroughs: optimize a hot loop, find a crash, profile cache misses, debug with GDB, and more (start here if you are wondering what the emulator is *for*)
 - **[TUTORIAL.md](TUTORIAL.md)** - Hands-on walkthrough of every feature, with commands you can run
 - **[USER-MANUAL.md](USER-MANUAL.md)** - Reference manual (CLI, profiles, peripherals, debugger)
 - **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)** - Quick reference for all commands and workflows
 - **[STATUS.md](STATUS.md)** - Feature status, test inventory, CLI flag summary
 - **[TESTING.md](TESTING.md)** - Test suite and validation procedures
 - **[doc/WRITING-PROGRAMS.md](doc/WRITING-PROGRAMS.md)** - Installing a cross-compiler and compiling your own C programs
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history (run `riscv_emulator --version` to see your build)
 
 ### Reference Documentation
 

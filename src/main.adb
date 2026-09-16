@@ -41,6 +41,7 @@ with RISCV.CSR;
 with RISCV.ELF;           use RISCV.ELF;
 with RISCV.Config;
 with RISCV.Settings;
+with RISCV.Version;
 with RISCV.CPU64;
 with RISCV.CSR64;
 with RISCV.Cache;
@@ -135,7 +136,7 @@ procedure Main is
 
    procedure Print_Usage is
    begin
-      Put_Line ("RISC-V Emulator (RV32IMFDV)");
+      Put_Line ("RISC-V Emulator " & Version.Value & " (RV32/RV64)");
       Put_Line ("");
       Put_Line ("Usage: riscv_emulator [options] <file> [start_address]");
       Put_Line ("");
@@ -169,6 +170,7 @@ procedure Main is
       Put_Line ("  --pty             Connect UART to a PTY (for minicom/screen)");
       Put_Line ("  --wait            Wait for keypress before starting (requires --pty)");
       Put_Line ("  -q, --quiet       Suppress informational output");
+      Put_Line ("  -V, --version     Print version and exit");
       Put_Line ("  --log-dir <dir>   Write semihosting log files to <dir> (default: CWD)");
       Put_Line ("  --no-access-faults  Do not trap unmapped/read-only accesses (legacy)");
       Put_Line ("  --host-io <mode>  Guest access to host files: off, ro, rw (default: rw)");
@@ -228,6 +230,15 @@ procedure Main is
    end Print_Profiles;
 
 begin
+   --  --version / -V: print and exit before doing anything else.
+   for I in 1 .. Argument_Count loop
+      if Argument (I) = "--version" or else Argument (I) = "-V" then
+         Put_Line ("riscv_emulator " & Version.Value);
+         Put_Line ("RV32/RV64 IMAFDC + RVV emulator, written in Ada");
+         return;
+      end if;
+   end loop;
+
    if Argument_Count < 1 then
       Print_Usage;
       return;
