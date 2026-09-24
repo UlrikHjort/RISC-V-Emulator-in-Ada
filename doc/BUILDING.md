@@ -150,6 +150,20 @@ OPT_FLAGS = -O2
 | `-gnatybfhiklnprtu` | Style checks |
 | `-O2` | Optimization level 2 |
 
+The small C floating-point helper (`src/riscv_fp_helpers.c`) is built with
+`CFLAGS = -O1 -Wall -frounding-math -march=$(MARCH)`, where `MARCH` defaults
+to `native`. That tunes it to the build machine's CPU, so the resulting binary
+may crash with an illegal-instruction error on a CPU without the same
+extensions (for example, AVX-512's unsigned int/float conversions). To build a
+binary you intend to copy to other machines, use the portable baseline:
+
+```bash
+make MARCH=x86-64
+```
+
+CI builds this way. Results are identical either way; only instruction
+selection differs.
+
 ## Project Structure
 
 ```
@@ -303,7 +317,9 @@ three jobs:
 1. **build** - build the Ada emulator and run the Ada unit tests. Pinned to
    `ubuntu-22.04` + `gnat-10`: the build uses `-gnatwae` (warnings as errors),
    and a newer GNAT flags new warnings, so the toolchain is pinned to match.
-   The built binary is uploaded as an artifact for the other jobs. It links
+   Built with `MARCH=x86-64` (not `native`), because GitHub runners have
+   varying CPUs and the binary is reused on other runners. The built binary
+   is uploaded as an artifact for the other jobs. It links
    the GNAT runtime dynamically (`libgnat-10.so`), so the other jobs also run
    on `ubuntu-22.04`, install only the `libgnat-10` runtime package, and
    smoke-test the binary with `--version` before running anything.

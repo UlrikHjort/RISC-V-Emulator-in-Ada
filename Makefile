@@ -7,7 +7,12 @@ GNATCLEAN = gnatclean
 GNAT_FLAGS = -gnata -gnatwae -gnatVa -gnatybfhiklnprtu
 OPT_FLAGS = -O2
 CC = gcc
-CFLAGS = -O1 -Wall -frounding-math -march=native
+# -march for the C FP helper. `native` tunes it to this machine's CPU, but the
+# binary may then die with SIGILL on a CPU lacking those instructions (e.g.
+# AVX-512 unsigned int<->float converts). For a binary that runs on any x86-64
+# machine -- CI artifacts, copies to other hosts -- use: make MARCH=x86-64
+MARCH ?= native
+CFLAGS = -O1 -Wall -frounding-math -march=$(MARCH)
 
 # Directories
 SRC_DIR = src

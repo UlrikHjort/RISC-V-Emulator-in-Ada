@@ -41,10 +41,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gnat-10 make
 
       - name: Build emulator
-        run: make GNATMAKE=gnatmake-10
+        # MARCH=x86-64: the binary is reused on other runners whose CPU may
+        # lack this runner's extensions (-march=native gave AVX-512 SIGILLs).
+        run: make GNATMAKE=gnatmake-10 MARCH=x86-64
 
       - name: Ada unit tests
-        run: make test GNATMAKE=gnatmake-10
+        run: make test GNATMAKE=gnatmake-10 MARCH=x86-64
 
       - name: Upload emulator binary
         uses: actions/upload-artifact@v4
