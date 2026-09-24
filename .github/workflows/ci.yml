@@ -8,16 +8,25 @@
 #                   so we check "no regression below baseline", not exit code)
 #
 # Toolchain split: the Ada build needs GNAT 10 (the build uses -gnatwae, and a
-# newer GNAT flags new warnings), while the cross toolchain needs a recent gcc
-# for the bit-manip / crypto extensions. So `build` runs on 22.04 with gnat-10
-# and uploads the binary as an artifact; jobs 2 and 3 download that binary and
-# only add a recent RISC-V gcc -- the two toolchains never share an image.
+# newer GNAT flags new warnings), so `build` runs on 22.04 with gnat-10 and
+# uploads the binary as an artifact. Jobs 2 and 3 download that binary and add
+# the RISC-V cross toolchain -- the two toolchains never share an image.
+#
+# The cross toolchain is xPack GNU RISC-V Embedded GCC, not Ubuntu's
+# gcc-riscv64-unknown-elf: the Ubuntu package ships no C library headers, and
+# several programs include <stdio.h>/<string.h>/<ctype.h> (newlib). xPack
+# 14.3.0 matches the GCC version used for development, bundles newlib, and
+# carries the RV32 + RV64 multilibs the programs link -lgcc against. Its
+# prefix is riscv-none-elf-.
 
 name: CI
 
 on:
   push:
   pull_request:
+
+env:
+  XPACK_VERSION: "14.3.0-1"
 
 jobs:
   # --- Tier 1: Ada build + unit tests (must pass) ------------------------
@@ -47,12 +56,27 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
-      CROSS: riscv64-unknown-elf-      # apt toolchain uses the riscv64 prefix
+      CROSS: riscv-none-elf-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install RISC-V cross toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf make
+      # ---- RISC-V toolchain (same block in the compliance job) ----
+      - name: Cache RISC-V toolchain tarball
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/xpack.tar.gz
+          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_VERSION }}
+      - name: Download RISC-V toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: >
+          curl -fsSL -o ~/xpack.tar.gz
+          https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${XPACK_VERSION}/xpack-riscv-none-elf-gcc-${XPACK_VERSION}-linux-x64.tar.gz
+      - name: Install RISC-V toolchain
+        run: |
+          mkdir -p ~/xpack-riscv
+          tar xzf ~/xpack.tar.gz -C ~/xpack-riscv --strip-components=1
+          echo "$HOME/xpack-riscv/bin" >> "$GITHUB_PATH"
 
       - name: Fetch emulator binary
         uses: actions/download-artifact@v4
@@ -72,9 +96,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
-      RISCV_PREFIX: riscv64-unknown-elf         # for arch-test/run_arch_tests.sh
-      RISCV_CC: riscv64-unknown-elf-gcc         # for run-riscv-tests.sh
-      RISCV_NM: riscv64-unknown-elf-nm
+      RISCV_PREFIX: riscv-none-elf              # for arch-test/run_arch_tests.sh
+      RISCV_CC: riscv-none-elf-gcc              # for run-riscv-tests.sh
+      RISCV_NM: riscv-none-elf-nm
       # Baselines: the current known-good pass counts. Bump these ONLY when a
       # real improvement raises them; a drop below is a regression and fails CI.
       ARCH_MIN_PASS: "291"                      # arch-test 'all' (of 300)
@@ -87,8 +111,23 @@ jobs:
         with:
           submodules: recursive                 # brings in arch-test/riscv-arch-test
 
-      - name: Install RISC-V cross toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf make
+      # ---- RISC-V toolchain (same block in the programs job) ----
+      - name: Cache RISC-V toolchain tarball
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/xpack.tar.gz
+          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_VERSION }}
+      - name: Download RISC-V toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: >
+          curl -fsSL -o ~/xpack.tar.gz
+          https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${XPACK_VERSION}/xpack-riscv-none-elf-gcc-${XPACK_VERSION}-linux-x64.tar.gz
+      - name: Install RISC-V toolchain
+        run: |
+          mkdir -p ~/xpack-riscv
+          tar xzf ~/xpack.tar.gz -C ~/xpack-riscv --strip-components=1
+          echo "$HOME/xpack-riscv/bin" >> "$GITHUB_PATH"
 
       - name: Fetch emulator binary
         uses: actions/download-artifact@v4

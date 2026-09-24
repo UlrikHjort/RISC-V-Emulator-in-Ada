@@ -307,7 +307,10 @@ three jobs:
    and cross toolchains never share a runner image.
 2. **programs** - install the RISC-V cross toolchain, build the C test
    programs, and run `programs/test-all.sh` (which exits non-zero on any
-   failing assertion).
+   failing assertion). The toolchain is xPack GNU RISC-V Embedded GCC 14.3.0
+   (prefix `riscv-none-elf-`, tarball cached between runs) rather than
+   Ubuntu's `gcc-riscv64-unknown-elf`, which ships no C library headers -
+   several programs include newlib headers such as `<stdio.h>`.
 3. **compliance** - run `arch-test/run_arch_tests.sh all` and the upstream
    `riscv-tests`, gated on a **pass-count baseline** rather than exit code:
    both suites have known, by-design deviations, so CI checks "no regression
