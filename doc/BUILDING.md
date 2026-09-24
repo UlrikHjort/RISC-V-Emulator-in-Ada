@@ -303,8 +303,10 @@ three jobs:
 1. **build** - build the Ada emulator and run the Ada unit tests. Pinned to
    `ubuntu-22.04` + `gnat-10`: the build uses `-gnatwae` (warnings as errors),
    and a newer GNAT flags new warnings, so the toolchain is pinned to match.
-   The built binary is uploaded as an artifact for the other jobs, so the Ada
-   and cross toolchains never share a runner image.
+   The built binary is uploaded as an artifact for the other jobs. It links
+   the GNAT runtime dynamically (`libgnat-10.so`), so the other jobs also run
+   on `ubuntu-22.04`, install only the `libgnat-10` runtime package, and
+   smoke-test the binary with `--version` before running anything.
 2. **programs** - install the RISC-V cross toolchain, build the C test
    programs, and run `programs/test-all.sh` (which exits non-zero on any
    failing assertion). The toolchain is xPack GNU RISC-V Embedded GCC 14.3.0
