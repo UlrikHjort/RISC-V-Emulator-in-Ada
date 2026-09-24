@@ -1,4 +1,5 @@
 # RISC-V Emulator
+[![CI](https://github.com/UlrikHjort/RISC-V-Emulator-in-Ada/actions/workflows/ci.yml/badge.svg)](https://github.com/UlrikHjort/RISC-V-Emulator-in-Ada/actions/workflows/ci.yml)
 
 A RISC-V emulator written in Ada, for embedded software testing and
 development. It runs both 32- and 64-bit bare-metal programs, emulates the
