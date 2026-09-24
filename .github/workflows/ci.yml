@@ -1,0 +1,176 @@
+# CI for the RISC-V emulator.
+#
+# Three tiers, each a separate job:
+#   1. build     -- build the Ada emulator + run the Ada unit tests   (blocking)
+#   2. programs  -- build the C test programs + run the 2263-assertion suite
+#   3. compliance-- riscv-arch-test and riscv-tests, gated on a pass-count
+#                   baseline (these suites have KNOWN, by-design deviations,
+#                   so we check "no regression below baseline", not exit code)
+#
+# The Ada build needs GNAT 10 (the build uses -gnatwae, and a newer GNAT flags
+# new warnings), so `build` runs on 22.04 with gnat-10 and uploads the binary
+# as an artifact. The binary links the GNAT runtime dynamically
+# (libgnat-10.so), so jobs 2 and 3 also run on 22.04 and install just the
+# libgnat-10 runtime package; a --version smoke step fails loudly if the
+# binary cannot start, rather than every test silently producing no log.
+#
+# The cross toolchain is xPack GNU RISC-V Embedded GCC, not Ubuntu's
+# gcc-riscv64-unknown-elf: the Ubuntu package ships no C library headers, and
+# several programs include <stdio.h>/<string.h>/<ctype.h> (newlib). xPack
+# 14.3.0 matches the GCC version used for development, bundles newlib, and
+# carries the RV32 + RV64 multilibs the programs link -lgcc against. Its
+# prefix is riscv-none-elf-.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  XPACK_VERSION: "14.3.0-1"
+
+jobs:
+  # --- Tier 1: Ada build + unit tests (must pass) ------------------------
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GNAT 10
+        run: sudo apt-get update && sudo apt-get install -y gnat-10 make
+
+      - name: Build emulator
+        # MARCH=x86-64: the binary is reused on other runners whose CPU may
+        # lack this runner's extensions (-march=native gave AVX-512 SIGILLs).
+        run: make GNATMAKE=gnatmake-10 MARCH=x86-64
+
+      - name: Ada unit tests
+        run: make test GNATMAKE=gnatmake-10 MARCH=x86-64
+
+      - name: Upload emulator binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv_emulator
+          path: bin/riscv_emulator
+          retention-days: 7
+
+  # --- Tier 2: bare-metal C program suite --------------------------------
+  programs:
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      CROSS: riscv-none-elf-
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- RISC-V toolchain (same block in the compliance job) ----
+      - name: Cache RISC-V toolchain tarball
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/xpack.tar.gz
+          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_VERSION }}
+      - name: Download RISC-V toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: >
+          curl -fsSL -o ~/xpack.tar.gz
+          https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${XPACK_VERSION}/xpack-riscv-none-elf-gcc-${XPACK_VERSION}-linux-x64.tar.gz
+      - name: Install RISC-V toolchain
+        run: |
+          mkdir -p ~/xpack-riscv
+          tar xzf ~/xpack.tar.gz -C ~/xpack-riscv --strip-components=1
+          echo "$HOME/xpack-riscv/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch emulator binary
+        uses: actions/download-artifact@v4
+        with:
+          name: riscv_emulator
+          path: bin
+      - run: chmod +x bin/riscv_emulator
+
+      - name: Install GNAT runtime (the emulator links libgnat-10.so)
+        run: sudo apt-get update && sudo apt-get install -y libgnat-10
+
+      - name: Smoke-test emulator binary
+        run: bin/riscv_emulator --version
+
+      - name: Build test programs
+        run: make -C programs all
+
+      - name: Run program suite (expects 0 FAIL)
+        run: bash programs/test-all.sh
+
+  # --- Tier 3: architecture compliance (baseline-gated) ------------------
+  compliance:
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      RISCV_PREFIX: riscv-none-elf              # for arch-test/run_arch_tests.sh
+      RISCV_CC: riscv-none-elf-gcc              # for run-riscv-tests.sh
+      RISCV_NM: riscv-none-elf-nm
+      # Baselines: the current known-good pass counts. Bump these ONLY when a
+      # real improvement raises them; a drop below is a regression and fails CI.
+      ARCH_MIN_PASS: "291"                      # arch-test 'all' (of 300)
+      RISCV_TESTS_MIN_PASS: "284"               # riscv-tests   (of 293)
+      # Pinned to the revision the 284 baseline was measured against; bump
+      # deliberately alongside RISCV_TESTS_MIN_PASS.
+      RISCV_TESTS_REF: "34e6b6d1e7936b526075432fb730d89148623484"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive                 # brings in arch-test/riscv-arch-test
+
+      # ---- RISC-V toolchain (same block in the programs job) ----
+      - name: Cache RISC-V toolchain tarball
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/xpack.tar.gz
+          key: xpack-riscv-none-elf-gcc-${{ env.XPACK_VERSION }}
+      - name: Download RISC-V toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: >
+          curl -fsSL -o ~/xpack.tar.gz
+          https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v${XPACK_VERSION}/xpack-riscv-none-elf-gcc-${XPACK_VERSION}-linux-x64.tar.gz
+      - name: Install RISC-V toolchain
+        run: |
+          mkdir -p ~/xpack-riscv
+          tar xzf ~/xpack.tar.gz -C ~/xpack-riscv --strip-components=1
+          echo "$HOME/xpack-riscv/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch emulator binary
+        uses: actions/download-artifact@v4
+        with:
+          name: riscv_emulator
+          path: bin
+      - run: chmod +x bin/riscv_emulator
+
+      - name: Install GNAT runtime (the emulator links libgnat-10.so)
+        run: sudo apt-get update && sudo apt-get install -y libgnat-10
+
+      - name: Smoke-test emulator binary
+        run: bin/riscv_emulator --version
+
+      - name: riscv-arch-test (all suites, baseline-gated)
+        run: |
+          set -o pipefail
+          out=$(bash arch-test/run_arch_tests.sh all || true)
+          echo "$out"
+          pass=$(echo "$out" | grep -E '^\s*TOTAL' | grep -oE 'Pass:\s*[0-9]+' | grep -oE '[0-9]+' | tail -1)
+          echo "arch-test pass=$pass  baseline=$ARCH_MIN_PASS"
+          test -n "$pass" && [ "$pass" -ge "$ARCH_MIN_PASS" ]
+
+      - name: riscv-tests (baseline-gated)
+        run: |
+          set -o pipefail
+          git clone https://github.com/riscv-software-src/riscv-tests.git programs/riscv-tests
+          git -C programs/riscv-tests checkout --quiet "$RISCV_TESTS_REF"
+          # run-riscv-tests.sh needs env/p (link.ld + macros), which is a
+          # submodule of riscv-tests -- fetch it or every build fails.
+          git -C programs/riscv-tests submodule update --init --recursive
+          out=$(bash programs/run-riscv-tests.sh || true)
+          echo "$out"
+          pass=$(echo "$out" | grep -E '^TOTAL' | awk '{print $3}' | tail -1)
+          echo "riscv-tests pass=$pass  baseline=$RISCV_TESTS_MIN_PASS"
+          test -n "$pass" && [ "$pass" -ge "$RISCV_TESTS_MIN_PASS" ]

@@ -150,6 +150,20 @@ OPT_FLAGS = -O2
 | `-gnatybfhiklnprtu` | Style checks |
 | `-O2` | Optimization level 2 |
 
+The small C floating-point helper (`src/riscv_fp_helpers.c`) is built with
+`CFLAGS = -O1 -Wall -frounding-math -march=$(MARCH)`, where `MARCH` defaults
+to `native`. That tunes it to the build machine's CPU, so the resulting binary
+may crash with an illegal-instruction error on a CPU without the same
+extensions (for example, AVX-512's unsigned int/float conversions). To build a
+binary you intend to copy to other machines, use the portable baseline:
+
+```bash
+make MARCH=x86-64
+```
+
+CI builds this way. Results are identical either way; only instruction
+selection differs.
+
 ## Project Structure
 
 ```
@@ -297,20 +311,29 @@ Use `ada-mode`:
 
 ## Continuous Integration
 
-Example GitHub Actions workflow:
+CI lives in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and runs
+three jobs:
 
-```yaml
-name: Build
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install GNAT
-        run: sudo apt-get install -y gnat
-      - name: Build
-        run: make
-      - name: Test
-        run: make test
-```
+1. **build** - build the Ada emulator and run the Ada unit tests. Pinned to
+   `ubuntu-22.04` + `gnat-10`: the build uses `-gnatwae` (warnings as errors),
+   and a newer GNAT flags new warnings, so the toolchain is pinned to match.
+   Built with `MARCH=x86-64` (not `native`), because GitHub runners have
+   varying CPUs and the binary is reused on other runners. The built binary
+   is uploaded as an artifact for the other jobs. It links
+   the GNAT runtime dynamically (`libgnat-10.so`), so the other jobs also run
+   on `ubuntu-22.04`, install only the `libgnat-10` runtime package, and
+   smoke-test the binary with `--version` before running anything.
+2. **programs** - install the RISC-V cross toolchain, build the C test
+   programs, and run `programs/test-all.sh` (which exits non-zero on any
+   failing assertion). The toolchain is xPack GNU RISC-V Embedded GCC 14.3.0
+   (prefix `riscv-none-elf-`, tarball cached between runs) rather than
+   Ubuntu's `gcc-riscv64-unknown-elf`, which ships no C library headers -
+   several programs include newlib headers such as `<stdio.h>`.
+3. **compliance** - run `arch-test/run_arch_tests.sh all` and the upstream
+   `riscv-tests`, gated on a **pass-count baseline** rather than exit code:
+   both suites have known, by-design deviations, so CI checks "no regression
+   below the baseline" (`ARCH_MIN_PASS`, `RISCV_TESTS_MIN_PASS`). Bump those
+   only when a real fix raises the numbers.
+
+Because `riscv-tests` is not vendored (see `.gitignore`), the compliance job
+clones it; `arch-test` is a git submodule fetched via `submodules: recursive`.
